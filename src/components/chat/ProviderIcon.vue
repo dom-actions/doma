@@ -61,4 +61,12 @@ const src = computed(() => ICONS[props.provider]);
   padding: 4px;
   box-sizing: border-box;
 }
+
+@media (prefers-color-scheme: dark) {
+  .provider-icon--openai .provider-icon-img,
+  .provider-icon--relay .provider-icon-img,
+  .provider-icon--anthropic .provider-icon-img {
+    filter: brightness(0) invert(1);
+  }
+}
 </style>
