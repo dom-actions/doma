@@ -414,6 +414,11 @@
             class="chat-msg-doma-badge"
             aria-hidden="true"
           >DomA</span>
+          <TurnActivityTraceView
+            v-if="item.msg.role === 'assistant' && item.msg.activityTrace"
+            :trace="item.msg.activityTrace"
+            @toggle="onActivityTraceToggle(item.msg)"
+          />
           <!-- user: 纯文本渲染；assistant: Markdown 渲染（已做 XSS 清洗） -->
           <div
             v-if="
@@ -444,7 +449,10 @@
           <AssistantMessageContent
             v-else-if="
               item.msg.role === 'assistant' &&
-              (item.msg.content?.trim() || activeStreamMsgId === item.msg.id)
+              (
+                item.msg.content?.trim() ||
+                (activeStreamMsgId === item.msg.id && !item.msg.activityTrace)
+              )
             "
             :content="String(item.msg.content)"
             :streaming="activeStreamMsgId === item.msg.id"
@@ -492,9 +500,14 @@
           <div
             v-if="
               item.msg.toolBarItems?.length ||
-              getVisibleToolCalls(item.msg.toolCalls).length ||
-              getDoingToolCalls(item.msg.toolCalls).length ||
-              (toolDebug && getDebugToolCalls(item.msg.toolCalls).length)
+              (
+                !item.msg.activityTrace &&
+                (
+                  getVisibleToolCalls(item.msg.toolCalls).length ||
+                  getDoingToolCalls(item.msg.toolCalls).length ||
+                  (toolDebug && getDebugToolCalls(item.msg.toolCalls).length)
+                )
+              )
             "
             class="msg-actions"
           >
@@ -675,12 +688,6 @@
       <div v-if="showPlanQuestionsCard" class="chat-msg assistant plan-questions-msg">
         <PlanQuestionsCard />
       </div>
-      <!-- 思考中状态：由 thinking 标志位控制 -->
-      <div v-if="thinking" class="chat-msg assistant thinking">
-        <div class="thinking-indicator" aria-label="thinking">
-          <span class="thinking-ball" aria-hidden="true"></span>
-        </div>
-      </div>
         <!-- 底部占位，确保滚动到底部时内容不被遮挡 -->
         <div class="scroll-anchor" aria-hidden="true"></div>
       </div>
@@ -843,6 +850,7 @@ import { llmManager, type LlmProvider, type LlmResponse, DEFAULT_MODELS } from "
 import { chatStorage, newChatMessageId, type StoredConversation, type StoredMessage } from "@/services/chat/chatStorage";
 import CustomUIRenderer from "./CustomUIRenderer.vue";
 import AssistantMessageContent from "./AssistantMessageContent.vue";
+import TurnActivityTraceView from "./TurnActivityTrace.vue";
 import ConversationPicker from "./ConversationPicker.vue";
 import ChatComposer from "./composer/ChatComposer.vue";
 import CreateExtensionDescDialog from "./composer/CreateExtensionDescDialog.vue";
@@ -895,6 +903,16 @@ import {
 import { isCliBridgeEnabled, isMcpBridgeEnabled } from "@/services/chat/mcpBridgePrefs";
 import { prepareUserSendText } from "@/services/chat/interactionBlockSendHints";
 import {
+  appendReasoningToTrace,
+  cloneTurnActivityTrace,
+  completeToolInTrace,
+  completeTraceBeforeAnswer,
+  createTurnActivityTrace,
+  finishTurnActivityTrace,
+  reopenTurnActivityTrace,
+  startToolInTrace,
+} from "@/services/chat/activityTrace";
+import {
   enrichUserSendTextWithMemories,
   type ActiveTabContext,
 } from "@/services/chat/memoryHooks";
@@ -938,6 +956,7 @@ import {
   type UserscriptsPayload,
   type ChatMessageToolBarItem,
   type ChatMessageToolCall,
+  type TurnActivityTrace,
   type CopySelectionAnchor,
   type CopySelectionChipPayload,
   type PageElementsPayload,
@@ -1112,6 +1131,11 @@ const CHAT_TYPEWRITER_ENABLED = false;
 
 const loadingConversationIds = ref<Set<string>>(new Set());
 const thinkingConversationIds = ref<Set<string>>(new Set());
+type ActivityTraceRuntime = {
+  rootMessageId: string;
+  trace: TurnActivityTrace;
+};
+const activityTraceByConversation = new Map<string, ActivityTraceRuntime>();
 /** 当前正在流式输出的 assistant 消息 id（用于轻量增量渲染） */
 const activeStreamMsgId = ref<string | null>(null);
 const abortControllersByConversation = new Map<string, AbortController>();
@@ -1547,6 +1571,89 @@ function setConversationThinking(convId: string, active: boolean) {
   thinkingConversationIds.value = next;
 }
 
+function publishActivityTrace(convId: string, runtime: ActivityTraceRuntime): void {
+  upsertAssistantMessage(
+    convId,
+    runtime.rootMessageId,
+    "",
+    undefined,
+    undefined,
+    cloneTurnActivityTrace(runtime.trace),
+  );
+}
+
+function startActivityTrace(convId: string, msgId: string): ActivityTraceRuntime {
+  const existing = activityTraceByConversation.get(convId);
+  if (existing) {
+    reopenTurnActivityTrace(existing.trace);
+    publishActivityTrace(convId, existing);
+    return existing;
+  }
+
+  const runtime: ActivityTraceRuntime = {
+    rootMessageId: msgId,
+    trace: createTurnActivityTrace(msgId),
+  };
+  activityTraceByConversation.set(convId, runtime);
+  publishActivityTrace(convId, runtime);
+  return runtime;
+}
+
+function appendActivityReasoning(convId: string, msgId: string, content: string): void {
+  if (!content) return;
+  const runtime = activityTraceByConversation.get(convId) ?? startActivityTrace(convId, msgId);
+  if (appendReasoningToTrace(runtime.trace, content)) {
+    publishActivityTrace(convId, runtime);
+  }
+}
+
+function startActivityTool(convId: string, msgId: string, toolCall: any): void {
+  const runtime = activityTraceByConversation.get(convId) ?? startActivityTrace(convId, msgId);
+  startToolInTrace(runtime.trace, toolCall, (key, named) => t(key, named ?? {}));
+  publishActivityTrace(convId, runtime);
+}
+
+function completeActivityTool(convId: string, toolCall: any, result?: unknown): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  if (completeToolInTrace(
+    runtime.trace,
+    toolCall,
+    result,
+    (key, named) => t(key, named ?? {}),
+  )) {
+    publishActivityTrace(convId, runtime);
+  }
+}
+
+function completeActivityBeforeAnswer(convId: string): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  if (completeTraceBeforeAnswer(runtime.trace)) {
+    publishActivityTrace(convId, runtime);
+  }
+}
+
+function finishActivityTrace(
+  convId: string,
+  status: "completed" | "stopped" | "error",
+): void {
+  const runtime = activityTraceByConversation.get(convId);
+  if (!runtime) return;
+  finishTurnActivityTrace(runtime.trace, status);
+  publishActivityTrace(convId, runtime);
+  activityTraceByConversation.delete(convId);
+}
+
+function onActivityTraceToggle(msg: ChatMessage): void {
+  if (!msg.activityTrace) return;
+  msg.activityTrace = {
+    ...msg.activityTrace,
+    expanded: !msg.activityTrace.expanded,
+  };
+  queueMessagePersist(msg.id, conversationId.value);
+}
+
 function isConversationLoading(convId: string | undefined): boolean {
   return !!convId && loadingConversationIds.value.has(convId);
 }
@@ -1561,6 +1668,11 @@ function transferConversationRuntimeState(fromId: string, toId: string) {
   if (thinkingConversationIds.value.has(fromId)) {
     setConversationThinking(fromId, false);
     setConversationThinking(toId, true);
+  }
+  const activity = activityTraceByConversation.get(fromId);
+  if (activity) {
+    activityTraceByConversation.delete(fromId);
+    activityTraceByConversation.set(toId, activity);
   }
 
   const controller = abortControllersByConversation.get(fromId);
@@ -1943,12 +2055,20 @@ function queueOffPanelAssistantUpsert(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ) {
   messagePersistConvById.set(msgId, convId);
   const prev = messagePersistQueues.get(msgId) ?? Promise.resolve();
   const next = prev
     .catch(() => {})
-    .then(() => upsertAssistantMessageInIdb(convId, msgId, content, toolCall, customUi));
+    .then(() => upsertAssistantMessageInIdb(
+      convId,
+      msgId,
+      content,
+      toolCall,
+      customUi,
+      activityTrace,
+    ));
   messagePersistQueues.set(msgId, next);
 }
 
@@ -1958,6 +2078,7 @@ async function upsertAssistantMessageInIdb(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ): Promise<void> {
   try {
     const existing = await chatStorage.getMessage(msgId);
@@ -1972,10 +2093,14 @@ async function upsertAssistantMessageInIdb(
       const plainCustomUi = customUi
         ? (JSON.parse(JSON.stringify(customUi)) as Record<string, unknown>)
         : (existing.customUi as Record<string, unknown> | undefined);
+      const plainActivityTrace = activityTrace
+        ? cloneTurnActivityTrace(activityTrace)
+        : existing.activityTrace;
       await chatStorage.updateMessage(msgId, {
         content: newContent,
         ...(toolCalls ? { toolCalls } : {}),
         ...(plainCustomUi ? { customUi: plainCustomUi } : {}),
+        ...(plainActivityTrace ? { activityTrace: plainActivityTrace } : {}),
       });
       return;
     }
@@ -1988,6 +2113,7 @@ async function upsertAssistantMessageInIdb(
       customUi: customUi
         ? (JSON.parse(JSON.stringify(customUi)) as Record<string, unknown>)
         : undefined,
+      activityTrace: activityTrace ? cloneTurnActivityTrace(activityTrace) : undefined,
     });
   } catch (e) {
     console.warn("[Chat] upsertAssistantMessageInIdb failed:", e);
@@ -2037,6 +2163,9 @@ async function persistMessageNow(messageId: string): Promise<void> {
   const plainToolBarItems = msg.toolBarItems
     ? (JSON.parse(JSON.stringify(msg.toolBarItems)) as any)
     : undefined;
+  const plainActivityTrace = msg.activityTrace
+    ? cloneTurnActivityTrace(msg.activityTrace)
+    : undefined;
   try {
     const ok = await chatStorage.updateMessage(messageId, {
       content: msg.content,
@@ -2047,6 +2176,7 @@ async function persistMessageNow(messageId: string): Promise<void> {
       toolInput: plainToolInputOut,
       toolBarItems: plainToolBarItems,
       toolCalls: plainToolCalls,
+      activityTrace: plainActivityTrace,
     });
     if (!ok) {
       await chatStorage.addMessage({
@@ -2061,6 +2191,7 @@ async function persistMessageNow(messageId: string): Promise<void> {
         toolInput: plainToolInputOut,
         toolBarItems: plainToolBarItems,
         toolCalls: plainToolCalls,
+        activityTrace: plainActivityTrace,
       });
     }
   } catch (e) {
@@ -3876,6 +4007,7 @@ function getDebugToolCalls(toolCalls: ChatMessageToolCall[] | undefined): ChatMe
 /** assistant 仅 tool 脚手架（gone、无正文）时不占气泡位，避免 tool 完成后留空行 */
 function isRenderableChatMessage(msg: ChatMessage): boolean {
   if (msg.role === "user") return true;
+  if (msg.activityTrace) return true;
   if (msg.customUi) return true;
   if (msg.toolBarItems?.length) return true;
   if (getDoingToolCalls(msg.toolCalls).length > 0) return true;
@@ -4318,6 +4450,7 @@ async function stopTask(
     abortControllersByConversation.delete(cid);
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
+    finishActivityTrace(cid, "stopped");
   }
   cancelled.value = true;
   const msg = typeof message === "string" ? message : undefined;
@@ -4340,6 +4473,7 @@ async function abortTask() {
     abortControllersByConversation.delete(cid);
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
+    finishActivityTrace(cid, "stopped");
   }
   cancelled.value = true;
 }
@@ -5274,6 +5408,9 @@ async function loadConversation(convId: string | undefined, reason = "unknown") 
       ),
       toolBarItems: (m as any).toolBarItems as ChatMessageToolBarItem[] | undefined,
       toolCalls: m.toolCalls as ChatMessageToolCall[],
+      activityTrace: m.activityTrace
+        ? cloneTurnActivityTrace(m.activityTrace)
+        : undefined,
     }));
     conversationId.value = convId;
 
@@ -5586,6 +5723,7 @@ function upsertAssistantMessage(
   content: string,
   toolCall?: ChatMessageToolCall,
   customUi?: CustomUI,
+  activityTrace?: TurnActivityTrace,
 ) {
   // 非当前面板：不碰 messages，直接串行写 IDB
   if (convId !== conversationId.value) {
@@ -5599,7 +5737,14 @@ function upsertAssistantMessage(
         panelBound: false,
       });
     }
-    queueOffPanelAssistantUpsert(convId, msgId, content, toolCall, customUi);
+    queueOffPanelAssistantUpsert(
+      convId,
+      msgId,
+      content,
+      toolCall,
+      customUi,
+      activityTrace,
+    );
     // Safari 页内把手镜像（Open / 非 Safari 为 noop）
     if (content || toolCall) {
       safariShellOnAssistantUpsert(
@@ -5624,6 +5769,7 @@ function upsertAssistantMessage(
       content: content ? sanitizeAssistantUserFacing(content) : "",
       customUi,
       toolCalls: toolCall ? [toolCall] : [],
+      activityTrace,
     };
     messages.value.push(msg);
     void nextTick(() => scrollToBottom(false));
@@ -5639,6 +5785,7 @@ function upsertAssistantMessage(
       else toolCalls[toolCallIdx] = toolCall;
     }
     if (customUi) msg.customUi = customUi;
+    if (activityTrace) msg.activityTrace = activityTrace;
   }
 
   if (toolCall) {
@@ -6515,10 +6662,14 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       },
       onTextMessage: (convId, msgId, content) => {
         setConversationThinking(convId, false);
+        completeActivityBeforeAnswer(convId);
         if (convId === conversationId.value) {
           activeStreamMsgId.value = msgId;
         }
         upsertAssistantMessage(convId, msgId, content);
+      },
+      onReasoningMessage: (convId, msgId, content) => {
+        appendActivityReasoning(convId, msgId, content);
       },
       onToolCallStart: (convId, msgId, toolCall) => {
         if (activeStreamMsgId.value === msgId) {
@@ -6531,6 +6682,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           toolName: toolCall.function.name,
         });
         setConversationThinking(convId, false);
+        startActivityTool(convId, msgId, toolCall);
         upsertAssistantMessage(convId, msgId, '', {
           id: toolCall.id,
           name: toolCall.function.name,
@@ -6538,6 +6690,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         } as ChatMessageToolCall);
       },
       onToolCallOverride: async (convId, msgId, toolCall, result) => {
+        completeActivityTool(convId, toolCall, result);
         // 只要返回里带了 doma_show_alert 字段，就优先走这个流程（不依赖 truthy）
         if (!!result && typeof result === "object" && "doma_show_alert" in (result as any)) {
           const alert = (result as any).doma_show_alert as { type?: string } | undefined;
@@ -6632,6 +6785,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           toolCallId: toolCall.id,
           toolName: toolCall.function.name,
         });
+        completeActivityTool(convId, toolCall);
         upsertAssistantMessage(convId, msgId, '', {
           id: toolCall.id,
           name: toolCall.function.name,
@@ -6650,6 +6804,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           activeStreamMsgId.value = msgId;
         }
         if (!isConversationLoading(convId)) return;
+        startActivityTrace(convId, msgId);
         setConversationThinking(convId, true);
       },
       onMessageDone: (convId, msgId) => {
@@ -6666,6 +6821,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         console.log("[tool debug] onConversationDone", { convId, msgIds });
         activeStreamMsgId.value = null;
         const lastMsgId = msgIds[msgIds.length - 1];
+        finishActivityTrace(convId, cancelled.value ? "stopped" : "completed");
         setConversationLoading(convId, false);
         setConversationThinking(convId, false);
         abortControllersByConversation.delete(convId);
@@ -6792,6 +6948,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         void finishTurn();
       },
       onMessageError: async (conversationId, msgId, error) => {
+        finishActivityTrace(conversationId, "error");
         if (isHttpError(error)) {
           await sendEdition.handleHttpError(
             { status: error.status, message: error.message },
@@ -8137,10 +8294,6 @@ defineExpose({
     }
   }
 
-    &.thinking {
-      padding: 10px 0;
-    }
-
   .msg-content {
     margin: 0;
     line-height: 1.4;
@@ -8574,27 +8727,6 @@ defineExpose({
       font-weight: 400;
       color: var(--stay-secondaryFont);
     }
-  }
-
-  .thinking-indicator {
-    display: inline-flex;
-    align-items: center;
-  }
-
-  .thinking-ball {
-    width: 15px;
-    height: 15px;
-    border-radius: 999px;
-    background: var(--stay-black);
-    opacity: 1;
-    transform: scale(0.75);
-    animation: thinking-breathe 1.05s ease-in-out infinite;
-  }
-
-  @keyframes thinking-breathe {
-    0% { transform: scale(0.75); }
-    50% { transform: scale(1); }
-    100% { transform: scale(0.75); }
   }
 
   .loading-dots {

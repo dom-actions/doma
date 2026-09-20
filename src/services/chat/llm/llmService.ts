@@ -178,6 +178,7 @@ export class LlmService {
             msgIds.push(msgId);
             options.onMessageStart(_conversationId, msgId);
             let assistantText = '';
+            let assistantReasoning = '';
             await prepareLlmHistory(history as Parameters<typeof prepareLlmHistory>[0], _conversationId);
             for await (const sseEvent of fetchSSE(this.endPoint(), await this.fetchOptions(_conversationId, userId, deviceId, site, ever, history), msgId, signal)) {
               if (sseEvent.type === 'usage' && sseEvent.usage) {
@@ -193,11 +194,20 @@ export class LlmService {
                 assistantText += sseEvent.content;
                 options.onTextMessage(_conversationId, sseEvent.msgId!, sseEvent.content);
               }
+              if (sseEvent.type === 'reasoning') {
+                assistantReasoning += sseEvent.content;
+                options.onReasoningMessage?.(
+                  _conversationId,
+                  sseEvent.msgId!,
+                  sseEvent.content,
+                );
+              }
               if (sseEvent.type === 'tool_call') {
                 // assistant 的 tool_calls 消息必须在 tool result 之前加入历史
                 history.push({
                   role: 'assistant',
                   content: assistantText || null,
+                  ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}),
                   tool_calls: sseEvent.toolCalls!.map(tc => ({
                     id: tc.id,
                     type: tc.type,
@@ -305,7 +315,11 @@ export class LlmService {
 
             // 纯文本回复结束，将 assistant 消息加入历史
             if (assistantText) {
-              history.push({ role: 'assistant', content: assistantText } as any);
+              history.push({
+                role: 'assistant',
+                content: assistantText,
+                ...(assistantReasoning ? { reasoning_content: assistantReasoning } : {}),
+              } as any);
             }
 
             options.onMessageDone(_conversationId, msgId);

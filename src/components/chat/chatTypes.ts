@@ -1365,6 +1365,33 @@ export interface ChatMessageToolBarItem{
   msgIds: string[];
 }
 
+export type ActivityTraceStatus = 'running' | 'completed' | 'stopped' | 'error';
+export type ActivityTracePhase = 'thinking' | 'searching' | 'browsing' | 'working';
+export type ActivityTraceItemKind = 'reasoning' | 'search' | 'browse' | 'tool';
+
+export interface ActivityTraceItem {
+  id: string;
+  kind: ActivityTraceItemKind;
+  text: string;
+  status: 'running' | 'completed' | 'error';
+  toolCallId?: string;
+  url?: string;
+}
+
+/**
+ * 一次用户请求的可见活动轨迹。
+ * reasoning 只记录供应商实际返回的推理字段；其余条目来自真实工具执行事件。
+ */
+export interface TurnActivityTrace {
+  id: string;
+  status: ActivityTraceStatus;
+  phase: ActivityTracePhase;
+  startedAt: number;
+  finishedAt?: number;
+  expanded: boolean;
+  items: ActivityTraceItem[];
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -1376,6 +1403,7 @@ export interface ChatMessage {
   toolInput?: Record<string, unknown>;
   toolBarItems?: ChatMessageToolBarItem[];
   toolCalls: ChatMessageToolCall[];
+  activityTrace?: TurnActivityTrace;
 }
 
 /**
