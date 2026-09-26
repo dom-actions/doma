@@ -27,23 +27,23 @@ const hostEl = ref<HTMLElement | null>(null);
 let view: EditorView | null = null;
 
 const markdownHighlightStyle = HighlightStyle.define([
-  { tag: tags.heading, color: "#2f3134", fontWeight: "700" },
-  { tag: tags.heading1, color: "#2f3134", fontWeight: "700" },
-  { tag: tags.heading2, color: "#2f3134", fontWeight: "700" },
-  { tag: tags.heading3, color: "#2f3134", fontWeight: "600" },
-  { tag: tags.heading4, color: "#444", fontWeight: "600" },
-  { tag: tags.strong, color: "#2f3134", fontWeight: "700" },
-  { tag: tags.emphasis, color: "#555", fontStyle: "italic" },
+  { tag: tags.heading, color: "var(--stay-black, #2f3134)", fontWeight: "700" },
+  { tag: tags.heading1, color: "var(--stay-black, #2f3134)", fontWeight: "700" },
+  { tag: tags.heading2, color: "var(--stay-black, #2f3134)", fontWeight: "700" },
+  { tag: tags.heading3, color: "var(--stay-black, #2f3134)", fontWeight: "600" },
+  { tag: tags.heading4, color: "var(--stay-black, #444)", fontWeight: "600" },
+  { tag: tags.strong, color: "var(--stay-black, #2f3134)", fontWeight: "700" },
+  { tag: tags.emphasis, color: "var(--stay-secondaryFont, #555)", fontStyle: "italic" },
   { tag: tags.link, color: "#3674ef", textDecoration: "underline" },
   { tag: tags.url, color: "#3674ef" },
-  { tag: tags.monospace, color: "#c0392b", backgroundColor: "rgba(47, 49, 52, 0.06)" },
+  { tag: tags.monospace, color: "#c0392b", backgroundColor: "color-mix(in srgb, var(--stay-black) 6%, transparent)" },
   { tag: tags.quote, color: "#8a8a8a", fontStyle: "italic" },
   { tag: tags.contentSeparator, color: "#8a8a8a" },
   { tag: tags.meta, color: "#8a8a8a" },
   { tag: tags.processingInstruction, color: "#8a8a8a" },
   { tag: tags.list, color: "#3674ef" },
   { tag: tags.comment, color: "#8a8a8a" },
-  { tag: tags.string, color: "#2f3134" },
+  { tag: tags.string, color: "var(--stay-black, #2f3134)" },
   { tag: tags.keyword, color: "#3674ef", fontWeight: "600" },
 ]);
 
@@ -83,7 +83,7 @@ function createEditor(parent: HTMLElement) {
             lineHeight: "1.5",
           },
           ".cm-gutters": {
-            backgroundColor: "rgba(47, 49, 52, 0.04)",
+            backgroundColor: "color-mix(in srgb, var(--stay-black) 4%, transparent)",
             borderRight: "1px solid var(--stay-border, #e0e0e0)",
             color: "var(--stay-secondaryFont, #8a8a8a)",
           },
@@ -100,7 +100,7 @@ function createEditor(parent: HTMLElement) {
             backgroundColor: "rgba(54, 116, 239, 0.18) !important",
           },
           ".cm-activeLine": {
-            backgroundColor: "rgba(47, 49, 52, 0.04)",
+            backgroundColor: "color-mix(in srgb, var(--stay-black) 4%, transparent)",
           },
         }),
       ],
