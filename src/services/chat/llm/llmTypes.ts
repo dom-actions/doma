@@ -41,6 +41,8 @@ export interface LlmToolCallResult {
 export interface ConversationMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: unknown;
+  /** OpenAI-compatible reasoning models require this to be echoed across tool rounds. */
+  reasoning_content?: string;
 }
 
 /** ChatPanel → llmManager 共用可选字段；身份头由 entry.pro 灌入 */
@@ -55,6 +57,8 @@ export interface LlmSendMessageOptions {
   onConversationStart: (conversationId: string) => void;
   onConversationDone: (conversationId: string, msgIds: string[]) => void;
   onTextMessage: (conversationId: string, msgId: string, content: string) => void;
+  /** 仅当上游 API 实际返回 reasoning_content / reasoning 时触发。 */
+  onReasoningMessage?: (conversationId: string, msgId: string, content: string) => void;
   onToolCallStart: (conversationId: string, msgId: string, toolCall: any) => void;
   onToolCallOverride: (conversationId: string, msgId: string, toolCall: any, toolResult: ToolResult) => Promise<ToolResult | undefined>;
   onToolCallDone: (conversationId: string, msgId: string, toolCall: any) => void;

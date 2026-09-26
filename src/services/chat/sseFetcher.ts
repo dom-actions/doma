@@ -1,7 +1,7 @@
 import { parseLlmUsageFromSse, type LlmTokenUsage } from './llm/contextUsage';
 
 export type SseEvent = {
-    type: 'text' | 'tool_call' | 'usage' | 'done';
+    type: 'text' | 'reasoning' | 'tool_call' | 'usage' | 'done';
     content: string;            // 普通文本内容
     toolCalls?: any[];         // 完整的工具调用对象数组
     msgId?: string;            // 消息ID
@@ -97,6 +97,20 @@ export async function* fetchSSE(
                         yield { type: 'usage', content: '', usage, msgId: msgId };
                     }
                     const delta = json.choices?.[0]?.delta;
+                    const reasoningContent =
+                      typeof delta?.reasoning_content === 'string'
+                        ? delta.reasoning_content
+                        : typeof delta?.reasoning === 'string'
+                          ? delta.reasoning
+                          : '';
+                    if (reasoningContent) {
+                        yield {
+                            type: 'reasoning',
+                            content: reasoningContent,
+                            toolCalls: [],
+                            msgId: msgId,
+                        };
+                    }
                     if (delta?.content) {
                         yield { type: 'text', content: delta.content, toolCalls: [], msgId: msgId };
                         // 如果之前有正在进行的工具调用，说明工具调用结束了，先产出工具事件
@@ -211,6 +225,20 @@ export async function* fetchJSONChunk(
         buffer = buffer.slice(last + 1);
   
         const delta = json.choices?.[0]?.delta;
+
+        const reasoningContent =
+          typeof delta?.reasoning_content === "string"
+            ? delta.reasoning_content
+            : typeof delta?.reasoning === "string"
+              ? delta.reasoning
+              : "";
+        if (reasoningContent) {
+          yield {
+            type: "reasoning",
+            content: reasoningContent,
+            toolCalls: [],
+          };
+        }
   
         // =========================
         // 🟢 文本

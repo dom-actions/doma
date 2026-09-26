@@ -9,7 +9,11 @@ const STORE_MESSAGES = 'messages';
 const INDEX_CONVERSATIONS_UPDATED_AT = 'updatedAt';
 const INDEX_CONVERSATIONS_USER_ID = 'userId';
 
-import type { ChatMessageToolBarItem, ChatMessageToolCall } from '../../components/chat/chatTypes';
+import type {
+  ChatMessageToolBarItem,
+  ChatMessageToolCall,
+  TurnActivityTrace,
+} from '../../components/chat/chatTypes';
 import { LOCAL_USER_ID } from '../localUserId';
 import { deleteSpecAssetsByConversation } from './specAssetStore';
 import { deleteExtensionAssetsByConversation } from './extensionAssetStore';
@@ -29,6 +33,7 @@ export interface StoredMessage {
   timestamp: number;
   toolBarItems?: ChatMessageToolBarItem[];
   toolCalls?: ChatMessageToolCall[];
+  activityTrace?: TurnActivityTrace;
 }
 
 export interface StoredConversation {
