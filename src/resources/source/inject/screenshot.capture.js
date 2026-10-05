@@ -10,6 +10,20 @@ const ext = typeof chrome !== "undefined" ? chrome : browser;
 
 const CAPTURE_VIEWPORT_OPERATE = "chat/captureViewport";
 const REGISTRY_KEY = "__domaScreenshotCaptureRegistered";
+const CAPTURE_IGNORED_TAGS = new Set(["SCRIPT", "NOSCRIPT", "IFRAME", "OBJECT", "EMBED"]);
+
+function shouldIgnoreCaptureElement(element) {
+  if (CAPTURE_IGNORED_TAGS.has(element.tagName)) return true;
+  if (element.tagName !== "LINK") return false;
+
+  const rel = element.relList;
+  return (
+    element.as?.toLowerCase() === "script" ||
+    rel?.contains("modulepreload") ||
+    rel?.contains("preload") ||
+    rel?.contains("prefetch")
+  );
+}
 
 async function captureViewportDataUrl(jpegQuality) {
   if (window !== window.top) {
@@ -42,6 +56,8 @@ async function captureViewportDataUrl(jpegQuality) {
     scrollY: -window.scrollY,
     useCORS: true,
     allowTaint: false,
+    // 克隆页面时避免 iframe 导航或脚本预加载在扩展源下触发 CSP/重复执行。
+    ignoreElements: shouldIgnoreCaptureElement,
     // 后台 tab 降采样，减轻限速页面上 html2canvas 挂起
     scale: Math.min(window.devicePixelRatio || 1, 1),
     logging: false,
