@@ -562,7 +562,7 @@ watch(html, () => {
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 8px;
     overflow: hidden;
-    background: rgba(47, 49, 52, 0.04);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
   }
 
   :deep(.chat-markdown-panel) {
@@ -570,7 +570,7 @@ watch(html, () => {
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 8px;
     overflow: hidden;
-    background: rgba(47, 49, 52, 0.04);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
   }
 
   :deep(.chat-extension-card) {
@@ -578,7 +578,7 @@ watch(html, () => {
     padding: 12px 14px;
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 8px;
-    background: rgba(47, 49, 52, 0.04);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -593,14 +593,14 @@ watch(html, () => {
   :deep(.chat-extension-card-desc) {
     font-size: 12px;
     line-height: 1.45;
-    color: rgba(47, 49, 52, 0.72);
+    color: color-mix(in srgb, var(--stay-black) 72%, transparent);
     white-space: pre-wrap;
   }
 
   :deep(.chat-extension-card-id) {
     font-size: 11px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    color: rgba(47, 49, 52, 0.55);
+    color: color-mix(in srgb, var(--stay-black) 55%, transparent);
     word-break: break-all;
   }
 
@@ -608,7 +608,7 @@ watch(html, () => {
     margin: 2px 0 0;
     font-size: 12px;
     line-height: 1.4;
-    color: rgba(47, 49, 52, 0.65);
+    color: color-mix(in srgb, var(--stay-black) 65%, transparent);
   }
 
   :deep(.chat-extension-card-download) {
@@ -650,7 +650,7 @@ watch(html, () => {
     gap: 8px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--stay-border, #d0d0d0);
-    background: rgba(47, 49, 52, 0.06);
+    background: color-mix(in srgb, var(--stay-black) 6%, transparent);
   }
 
   :deep(.chat-markdown-panel-title) {
@@ -659,7 +659,7 @@ watch(html, () => {
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: rgba(47, 49, 52, 0.72);
+    color: color-mix(in srgb, var(--stay-black) 72%, transparent);
   }
 
   :deep(.chat-markdown-panel-actions) {
@@ -674,7 +674,7 @@ watch(html, () => {
     appearance: none;
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 6px;
-    background: #fff;
+    background: var(--stay-backgroundSecondary, #fff);
     color: var(--stay-black);
     font-size: 12px;
     line-height: 1;
@@ -698,7 +698,7 @@ watch(html, () => {
     justify-content: center;
     padding: 4px 12px 6px;
     border-top: 1px solid var(--stay-border, #d0d0d0);
-    background: rgba(47, 49, 52, 0.03);
+    background: color-mix(in srgb, var(--stay-black) 3%, transparent);
   }
 
   :deep(.chat-markdown-panel-back-top-btn) {
@@ -709,7 +709,7 @@ watch(html, () => {
     gap: 4px;
     border: none;
     background: transparent;
-    color: rgba(47, 49, 52, 0.72);
+    color: color-mix(in srgb, var(--stay-black) 72%, transparent);
     font-size: 12px;
     line-height: 1;
     padding: 2px 6px;
@@ -772,7 +772,7 @@ watch(html, () => {
 
   :deep(.chat-markdown-panel-body .chat-table-toolbar),
   :deep(.chat-markdown-panel-body .chat-code-toolbar) {
-    background: rgba(47, 49, 52, 0.04);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
     border-bottom-color: rgba(0, 0, 0, 0.06);
   }
 
@@ -823,7 +823,7 @@ watch(html, () => {
     gap: 8px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--stay-border, #d0d0d0);
-    background: rgba(47, 49, 52, 0.06);
+    background: color-mix(in srgb, var(--stay-black) 6%, transparent);
   }
 
   :deep(.chat-code-lang) {
@@ -832,7 +832,7 @@ watch(html, () => {
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: rgba(47, 49, 52, 0.72);
+    color: color-mix(in srgb, var(--stay-black) 72%, transparent);
   }
 
   :deep(.chat-code-copy-btn),
@@ -840,7 +840,7 @@ watch(html, () => {
     appearance: none;
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 6px;
-    background: #fff;
+    background: var(--stay-backgroundSecondary, #fff);
     color: var(--stay-black);
     font-size: 12px;
     line-height: 1;
@@ -922,8 +922,8 @@ watch(html, () => {
   :deep(blockquote) {
     margin: 8px 0;
     padding: 6px 10px;
-    border-left: 3px solid rgba(47, 49, 52, 0.25);
-    background: rgba(47, 49, 52, 0.04);
+    border-left: 3px solid color-mix(in srgb, var(--stay-black) 25%, transparent);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
     color: var(--stay-black);
   }
 
@@ -946,7 +946,7 @@ watch(html, () => {
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 8px;
     overflow: hidden;
-    background: rgba(47, 49, 52, 0.04);
+    background: color-mix(in srgb, var(--stay-black) 4%, transparent);
   }
 
   :deep(p + .chat-table-block) {
@@ -960,7 +960,7 @@ watch(html, () => {
     gap: 8px;
     padding: 6px 10px;
     border-bottom: 1px solid var(--stay-border, #d0d0d0);
-    background: rgba(47, 49, 52, 0.06);
+    background: color-mix(in srgb, var(--stay-black) 6%, transparent);
   }
 
   :deep(.chat-table-lang) {
@@ -969,7 +969,7 @@ watch(html, () => {
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: rgba(47, 49, 52, 0.72);
+    color: color-mix(in srgb, var(--stay-black) 72%, transparent);
   }
 
   :deep(.chat-table-actions) {
@@ -990,7 +990,7 @@ watch(html, () => {
     gap: 5px;
     border: 1px solid var(--stay-border, #d0d0d0);
     border-radius: 6px;
-    background: #fff;
+    background: var(--stay-backgroundSecondary, #fff);
     color: var(--stay-black);
     font-size: 12px;
     line-height: 1;
@@ -1060,11 +1060,11 @@ watch(html, () => {
 
   :deep(th) {
     font-weight: 600;
-    background: rgba(47, 49, 52, 0.06);
+    background: color-mix(in srgb, var(--stay-black) 6%, transparent);
   }
 
   :deep(tr:nth-child(even) td) {
-    background: rgba(47, 49, 52, 0.03);
+    background: color-mix(in srgb, var(--stay-black) 3%, transparent);
   }
 
   :deep(a.chat-bubble-link),

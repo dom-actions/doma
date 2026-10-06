@@ -7187,12 +7187,11 @@ defineExpose({
 }
 
 @chat-link-color: rgb(54, 116, 239);
-@chat-doma-bubble-bg: rgb(200, 242, 255);
-@chat-ask-bubble-bg: rgb(220, 242, 220);
-@chat-mcp-bubble-bg: rgb(255, 236, 200);
-@chat-scheduled-bubble-bg: rgb(255, 228, 235);
-
 .chat-panel {
+  --chat-doma-bubble-bg: rgb(200, 242, 255);
+  --chat-ask-bubble-bg: rgb(220, 242, 220);
+  --chat-mcp-bubble-bg: rgb(255, 236, 200);
+  --chat-scheduled-bubble-bg: rgb(255, 228, 235);
   display: flex;
   flex-direction: column;
   position: absolute;
@@ -7210,6 +7209,15 @@ defineExpose({
   border-radius: 10px;
   overflow: hidden;
   isolation: isolate;
+}
+
+@media (prefers-color-scheme: dark) {
+  .chat-panel {
+    --chat-doma-bubble-bg: #17343b;
+    --chat-ask-bubble-bg: #203724;
+    --chat-mcp-bubble-bg: #3b301b;
+    --chat-scheduled-bubble-bg: #3a2228;
+  }
 }
 
 /* Safari 页内壳：圆角由 host 负责，内层再圆会露出白边，且挤裁 header 右上角 */
@@ -8119,19 +8127,19 @@ defineExpose({
   transition: opacity 0.15s ease;
 
   &--doma {
-    background: @chat-doma-bubble-bg;
+    background: var(--chat-doma-bubble-bg);
   }
 
   &--ask {
-    background: @chat-ask-bubble-bg;
+    background: var(--chat-ask-bubble-bg);
   }
 
   &--mcp {
-    background: @chat-mcp-bubble-bg;
+    background: var(--chat-mcp-bubble-bg);
   }
 
   &--scheduled {
-    background: @chat-scheduled-bubble-bg;
+    background: var(--chat-scheduled-bubble-bg);
   }
 
   &:hover {
@@ -8174,19 +8182,19 @@ defineExpose({
     position: relative;
 
     &.chat-msg--doma-triggered {
-      background: @chat-doma-bubble-bg;
+      background: var(--chat-doma-bubble-bg);
     }
 
     &.chat-msg--ask-mode {
-      background: @chat-ask-bubble-bg;
+      background: var(--chat-ask-bubble-bg);
     }
 
     &.chat-msg--mcp-call {
-      background: @chat-mcp-bubble-bg;
+      background: var(--chat-mcp-bubble-bg);
     }
 
     &.chat-msg--scheduled {
-      background: @chat-scheduled-bubble-bg;
+      background: var(--chat-scheduled-bubble-bg);
     }
 
     &:not(.chat-msg--inline-editing):hover {
@@ -8268,15 +8276,15 @@ defineExpose({
   }
 
   .chat-msg-doma-badge {
-    background: @chat-doma-bubble-bg;
+    background: var(--chat-doma-bubble-bg);
   }
 
   .chat-msg-mcp-badge {
-    background: @chat-mcp-bubble-bg;
+    background: var(--chat-mcp-bubble-bg);
   }
 
   .chat-msg-scheduled-badge {
-    background: @chat-scheduled-bubble-bg;
+    background: var(--chat-scheduled-bubble-bg);
   }
 
   &.assistant {
@@ -8435,7 +8443,7 @@ defineExpose({
       height: 40px;
       border-radius: 6px;
       overflow: hidden;
-      background: rgba(47, 49, 52, 0.06);
+      background: color-mix(in srgb, var(--stay-black) 6%, transparent);
     }
 
     :deep(.bubble-file-thumb) {
@@ -8466,7 +8474,7 @@ defineExpose({
     :deep(.bubble-file-meta) {
       flex: 0 0 auto;
       font-size: 12px;
-      color: rgba(47, 49, 52, 0.62);
+      color: color-mix(in srgb, var(--stay-black) 62%, transparent);
     }
 
     :deep(.copy-selection-chip.copy-selection-chip--bubble) {

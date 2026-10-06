@@ -349,7 +349,7 @@ function onSubmit() {
   padding: 0 12px;
   border: 1px solid var(--stay-border, #d0d0d0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--stay-backgroundSecondary, #fff);
   color: var(--stay-black, #2f3134);
   font-size: 14px;
   box-sizing: border-box;
@@ -366,7 +366,7 @@ function onSubmit() {
   padding: 8px 12px;
   border: 1px solid var(--stay-border, #d0d0d0);
   border-radius: 8px;
-  background: #fff;
+  background: var(--stay-backgroundSecondary, #fff);
   color: var(--stay-black, #2f3134);
   font-size: 13px;
   line-height: 1.45;

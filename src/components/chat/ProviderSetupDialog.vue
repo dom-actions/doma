@@ -844,7 +844,7 @@ async function closeDialog() {
     height: 14px;
     margin-left: 4px;
     cursor: pointer;
-    background-color: var(--stay-primary, #2f3134);
+    background-color: var(--stay-black, #2f3134);
     -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23000' d='M4.2 3.1 3.1 4.2 6.9 8l-3.8 3.8 1.1 1.1L8 9.1l3.8 3.8 1.1-1.1L9.1 8l3.8-3.8-1.1-1.1L8 6.9 4.2 3.1z'/%3E%3C/svg%3E")
       center / contain no-repeat;
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='%23000' d='M4.2 3.1 3.1 4.2 6.9 8l-3.8 3.8 1.1 1.1L8 9.1l3.8 3.8 1.1-1.1L9.1 8l3.8-3.8-1.1-1.1L8 6.9 4.2 3.1z'/%3E%3C/svg%3E")
@@ -888,8 +888,8 @@ async function closeDialog() {
     filter: brightness(0.98);
   }
   &.active {
-    border-color: color-mix(in srgb, var(--stay-primary, #2f3134) 35%, transparent);
-    background: color-mix(in srgb, var(--stay-primary, #2f3134) 8%, var(--stay-backgroundSecondary, #fff));
+    border-color: color-mix(in srgb, var(--stay-logo, #0d9488) 45%, transparent);
+    background: color-mix(in srgb, var(--stay-logo, #0d9488) 10%, var(--stay-backgroundSecondary, #fff));
   }
   &--static {
     cursor: default;
@@ -919,17 +919,17 @@ async function closeDialog() {
     }
     &:hover {
       filter: none;
-      background: color-mix(in srgb, var(--stay-primary, #2f3134) 4%, transparent);
+      background: color-mix(in srgb, var(--stay-black, #2f3134) 6%, transparent);
     }
     &.active {
       border-color: transparent;
       border-bottom-color: var(--stay-border, rgba(0, 0, 0, 0.06));
       background: color-mix(
         in srgb,
-        var(--stay-primary, #2f3134) 8%,
+        var(--stay-logo, #0d9488) 10%,
         var(--stay-backgroundSecondary, #fff)
       );
-      box-shadow: inset 2px 0 0 var(--stay-primary, #2f3134);
+      box-shadow: inset 2px 0 0 var(--stay-logo, #0d9488);
     }
   }
 }
@@ -960,12 +960,12 @@ async function closeDialog() {
   flex-shrink: 0;
   width: 16px;
   height: 16px;
-  color: var(--stay-primary, #2f3134);
+  color: var(--stay-logo, #0d9488);
 }
 .provider-setup-badge {
   flex-shrink: 0;
   font-size: 11px;
-  color: var(--stay-primary, #2f3134);
+  color: var(--stay-logo, #0d9488);
 }
 .provider-setup-empty {
   padding: 14px 8px;
@@ -989,7 +989,7 @@ async function closeDialog() {
     margin-top: 0;
     background: color-mix(
       in srgb,
-      var(--stay-primary, #2f3134) 8%,
+      var(--stay-black, #2f3134) 8%,
       var(--stay-backgroundSecondary, #fff)
     );
   }
@@ -1014,20 +1014,20 @@ async function closeDialog() {
   border-top: 1px solid var(--stay-border, rgba(0, 0, 0, 0.08));
   border-radius: 0;
   background: transparent;
-  color: var(--stay-primary, #2f3134);
+  color: var(--stay-black, #2f3134);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   opacity: 0.85;
   &:hover {
     opacity: 1;
-    background: color-mix(in srgb, var(--stay-primary, #2f3134) 6%, transparent);
+    background: color-mix(in srgb, var(--stay-black, #2f3134) 8%, transparent);
   }
 }
 .provider-setup-link-btn {
   border: 1px solid var(--stay-border, rgba(0, 0, 0, 0.14));
   background: transparent;
-  color: var(--stay-primary, #2f3134);
+  color: var(--stay-black, #2f3134);
   font-size: 12px;
   cursor: pointer;
   padding: 5px 10px;
@@ -1036,7 +1036,7 @@ async function closeDialog() {
   opacity: 0.85;
   &:hover {
     opacity: 1;
-    background: color-mix(in srgb, var(--stay-primary, #2f3134) 6%, transparent);
+    background: color-mix(in srgb, var(--stay-black, #2f3134) 8%, transparent);
   }
 }
 .provider-setup-row-actions {
@@ -1056,14 +1056,14 @@ async function closeDialog() {
 .provider-setup-action-btn {
   border: none;
   background: transparent;
-  color: var(--stay-primary, #2f3134);
+  color: var(--stay-black, #2f3134);
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   padding: 4px 8px;
   border-radius: 6px;
   &:hover {
-    background: color-mix(in srgb, var(--stay-primary, #2f3134) 8%, transparent);
+    background: color-mix(in srgb, var(--stay-black, #2f3134) 10%, transparent);
   }
   &--danger {
     color: #c0392b;
@@ -1150,7 +1150,7 @@ async function closeDialog() {
   flex-shrink: 0;
   transition: background 0.15s ease;
   &.on {
-    background: var(--stay-primary, #2f3134);
+    background: var(--stay-logo, #0d9488);
   }
 }
 .provider-setup-switch-knob {
@@ -1212,6 +1212,18 @@ async function closeDialog() {
     &:hover {
       filter: brightness(1.06);
     }
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .provider-setup-header-back:hover,
+  .provider-setup-close:hover,
+  .provider-setup-apikey-toggle:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .provider-setup-row:not(.provider-setup-row--in-group):not(.provider-setup-row--static):hover {
+    filter: brightness(1.08);
   }
 }
 </style>

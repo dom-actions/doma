@@ -712,6 +712,16 @@ onBeforeUnmount(() => {
   --finder-toolbar: #f6f6f6;
   --finder-border: rgba(0, 0, 0, 0.1);
   --finder-select: color-mix(in srgb, var(--stay-primary, #2f3134) 16%, transparent);
+  --finder-control-bg: #fff;
+  --finder-control-hover: #fafafa;
+  --finder-hover-bg: rgba(0, 0, 0, 0.04);
+  --finder-drop-bg: rgba(255, 255, 255, 0.72);
+  --finder-menu-bg: rgba(246, 246, 246, 0.82);
+  --finder-menu-border: rgba(0, 0, 0, 0.12);
+  --finder-menu-text: rgba(0, 0, 0, 0.85);
+  --finder-menu-separator: rgba(0, 0, 0, 0.1);
+  --finder-primary-bg: var(--stay-primary, #2f3134);
+  --finder-primary-text: var(--stay-white, #fff);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -749,7 +759,8 @@ onBeforeUnmount(() => {
   height: 24px;
   border: 1px solid var(--finder-border);
   border-radius: 6px;
-  background: #fff;
+  background: var(--finder-control-bg);
+  color: var(--stay-black, #1d1d1f);
   cursor: pointer;
   line-height: 1;
 }
@@ -786,7 +797,7 @@ onBeforeUnmount(() => {
 }
 
 .crumb:hover {
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--finder-hover-bg);
 }
 
 .crumb-sep {
@@ -801,7 +812,8 @@ onBeforeUnmount(() => {
 
 .tool-btn {
   border: 1px solid var(--finder-border);
-  background: #fff;
+  background: var(--finder-control-bg);
+  color: var(--stay-black, #1d1d1f);
   border-radius: 6px;
   padding: 4px 10px;
   font: inherit;
@@ -809,13 +821,13 @@ onBeforeUnmount(() => {
 }
 
 .tool-btn:hover {
-  background: #fafafa;
+  background: var(--finder-control-hover);
 }
 
 .tool-btn.primary,
 .auth-btn {
-  background: var(--stay-primary, #2f3134);
-  color: var(--stay-white, #fff);
+  background: var(--finder-primary-bg);
+  color: var(--finder-primary-text);
   border-color: transparent;
 }
 
@@ -842,9 +854,9 @@ onBeforeUnmount(() => {
 }
 
 .finder-body.drop-target {
-  outline: 2px dashed color-mix(in srgb, var(--stay-primary, #2f3134) 55%, transparent);
+  outline: 2px dashed color-mix(in srgb, var(--stay-logo, #0d9488) 55%, transparent);
   outline-offset: -10px;
-  background: color-mix(in srgb, var(--stay-primary, #2f3134) 6%, transparent);
+  background: color-mix(in srgb, var(--stay-logo, #0d9488) 8%, transparent);
 }
 
 .drop-overlay {
@@ -856,7 +868,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   pointer-events: none;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--finder-drop-bg);
   color: var(--stay-black, #1d1d1f);
   font-size: 15px;
   font-weight: 560;
@@ -944,7 +956,7 @@ onBeforeUnmount(() => {
 }
 
 .icon-item:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--finder-hover-bg);
 }
 
 .icon-item.selected {
@@ -1057,10 +1069,10 @@ onBeforeUnmount(() => {
   min-width: 160px;
   padding: 5px;
   /* 接近 macOS 菜单：浅灰 + 毛玻璃，避免纯白过亮 */
-  background: rgba(246, 246, 246, 0.82);
+  background: var(--finder-menu-bg);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
-  border: 0.5px solid rgba(0, 0, 0, 0.12);
+  border: 0.5px solid var(--finder-menu-border);
   border-radius: 10px;
   box-shadow:
     0 0 0 0.5px rgba(0, 0, 0, 0.04),
@@ -1079,12 +1091,12 @@ onBeforeUnmount(() => {
   font: inherit;
   font-size: 13px;
   cursor: pointer;
-  color: rgba(0, 0, 0, 0.85);
+  color: var(--finder-menu-text);
 }
 
 .ctx-item:hover:not(:disabled) {
-  background: var(--stay-primary, #2f3134);
-  color: #fff;
+  background: var(--finder-primary-bg);
+  color: var(--finder-primary-text);
 }
 
 .ctx-item:disabled {
@@ -1104,7 +1116,37 @@ onBeforeUnmount(() => {
 .ctx-sep {
   height: 1px;
   margin: 5px 8px;
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--finder-menu-separator);
+}
+
+@media (prefers-color-scheme: dark) {
+  .finder {
+    --finder-bg: #131313;
+    --finder-toolbar: #1c1c1c;
+    --finder-border: rgba(255, 255, 255, 0.14);
+    --finder-select: color-mix(in srgb, var(--stay-logo, #2dd4bf) 26%, transparent);
+    --finder-control-bg: #252525;
+    --finder-control-hover: #303030;
+    --finder-hover-bg: rgba(255, 255, 255, 0.08);
+    --finder-drop-bg: rgba(28, 28, 28, 0.88);
+    --finder-menu-bg: rgba(35, 35, 35, 0.9);
+    --finder-menu-border: rgba(255, 255, 255, 0.16);
+    --finder-menu-text: var(--stay-black, #dcdcdc);
+    --finder-menu-separator: rgba(255, 255, 255, 0.12);
+    --finder-primary-bg: #fff;
+    --finder-primary-text: #111;
+  }
+
+  .tool-btn.primary:hover,
+  .auth-btn:hover {
+    filter: brightness(0.92);
+  }
+
+  .finder-banner {
+    background: #3a3117;
+    color: #ffe59a;
+    border-bottom-color: #675521;
+  }
 }
 </style>
 
@@ -1115,5 +1157,13 @@ body,
   margin: 0;
   min-height: 100%;
   background: #ececec;
+}
+
+@media (prefers-color-scheme: dark) {
+  html,
+  body,
+  #app {
+    background: #131313;
+  }
 }
 </style>
