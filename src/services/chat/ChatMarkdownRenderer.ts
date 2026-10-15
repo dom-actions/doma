@@ -103,16 +103,38 @@ function isUrlInMarkdownLinkDest(full: string, offset: number): boolean {
 
 /** `[http://label](dest)` 中 label 内的 URL 不应再 autolink，否则会破坏 markdown 链接 */
 function isUrlInMarkdownLinkLabel(full: string, offset: number, rawLength: number): boolean {
+  const isEscapedBracket = (index: number) => {
+    let slashes = 0;
+    while (index > 0 && full[--index] === "\\") slashes++;
+    return slashes % 2 === 1;
+  };
+
+  // Find an enclosing label, skipping complete bracket pairs from earlier links.
+  let depth = 0;
   let i = offset - 1;
-  while (i >= 0 && full[i] !== "[") {
-    if (full[i] === "\n") return false;
+  while (i >= 0) {
+    const char = full[i];
+    if ((char === "[" || char === "]") && !isEscapedBracket(i)) {
+      if (char === "]") depth++;
+      else if (depth > 0) depth--;
+      else break;
+    }
     i--;
   }
   if (i < 0 || full[i] !== "[") return false;
 
   const urlEnd = offset + rawLength;
   let j = urlEnd;
-  while (j < full.length && full[j] !== "]" && full[j] !== "\n") j++;
+  depth = 0;
+  while (j < full.length) {
+    const char = full[j];
+    if ((char === "[" || char === "]") && !isEscapedBracket(j)) {
+      if (char === "[") depth++;
+      else if (depth > 0) depth--;
+      else break;
+    }
+    j++;
+  }
   if (j >= full.length || full[j] !== "]") return false;
 
   j++;
@@ -122,11 +144,28 @@ function isUrlInMarkdownLinkLabel(full: string, offset: number, rawLength: numbe
 
 /** 行内 `code` 内的 URL 不应 autolink，否则会生成 `` `[url](url)` `` 导致 marked 无法解析 */
 function isInsideInlineCode(full: string, offset: number): boolean {
-  let ticks = 0;
-  for (let i = 0; i < offset; i++) {
-    if (full[i] === "`" && full[i - 1] !== "\\") ticks++;
+  for (let start = 0; start < offset;) {
+    // Outside code, an escape consumes exactly the next character.
+    if (full[start] === "\\") { start += 2; continue; }
+    if (full[start] !== "`") { start++; continue; }
+    let contentStart = start + 1;
+    while (full[contentStart] === "`") contentStart++;
+    const delimiterLength = contentStart - start;
+
+    let closing = -1;
+    let next = full.indexOf("`", contentStart);
+    while (next !== -1) {
+      let end = next + 1;
+      while (full[end] === "`") end++;
+      if (end - next === delimiterLength) { closing = next; break; }
+      next = full.indexOf("`", end);
+    }
+    // An unmatched run is literal text; a later, shorter run may still open code.
+    if (closing === -1) { start = contentStart; continue; }
+    if (offset >= contentStart && offset < closing) return true;
+    start = closing + delimiterLength;
   }
-  return ticks % 2 === 1;
+  return false;
 }
 
 const IMAGE_URL_PATH_RE = /\.(?:svg|png|jpe?g|gif|webp|avif|ico)(?:[?#][^)\s]*)?$/i;
@@ -1194,6 +1233,9 @@ export class ChatMarkdownRenderer {
   private mergeSoftParagraphBreaks(input: string): string {
     const lines = input.split("\n");
     const out: string[] = [];
+    let previousSourceLine = "";
+    let previousSourceOffset = 0;
+    let sourceOffset = 0;
 
     const pushBlankLine = () => {
       if (out.length === 0) return;
@@ -1201,7 +1243,12 @@ export class ChatMarkdownRenderer {
       out.push("");
     };
 
-    const lastLine = () => out[out.length - 1]?.trim() ?? "";
+    const endsWithBareHttpUrl = (line: string, lineOffset: number) => {
+      const match = Array.from(line.matchAll(HTTP_URL_IN_TEXT_RE)).at(-1);
+      if (!match || !line.endsWith(match[0])) return false;
+      // Reuse autolinking exclusions with original offsets, including multiline wrappers.
+      return !shouldSkipHttpUrlAutolink(input, lineOffset + match.index!, match[0].length);
+    };
 
     const isTableLine = (t: string) =>
       isMarkdownTableRowLine(t) ||
@@ -1210,9 +1257,15 @@ export class ChatMarkdownRenderer {
 
     for (const raw of lines) {
       const trimmed = raw.trim();
+      const lineOffset = sourceOffset + raw.length - raw.trimStart().length;
+      sourceOffset += raw.length + 1;
       if (!trimmed) continue;
 
-      const prev = lastLine();
+      // Inspect original lines rather than repeatedly scanning an accumulating paragraph.
+      const prev = previousSourceLine;
+      const prevOffset = previousSourceOffset;
+      previousSourceLine = trimmed;
+      previousSourceOffset = lineOffset;
       const prevIsTable = prev ? isTableLine(prev) : false;
       const curIsTable = isTableLine(trimmed);
       const curIsBlock = isMarkdownBlockLine(trimmed);
@@ -1224,8 +1277,15 @@ export class ChatMarkdownRenderer {
       }
 
       if (prev && !isMarkdownBlockLine(prev)) {
-        const lastIdx = out.length - 1;
-        out[lastIdx] = out[lastIdx]! + trimmed;
+        if (endsWithBareHttpUrl(prev, prevOffset) || endsWithBareHttpUrl(trimmed, lineOffset)) {
+          // A newline must terminate a bare URL before autolinking runs.
+          pushBlankLine();
+          out.push(trimmed);
+        } else {
+          const separator = /[A-Za-z0-9_]$/.test(prev) && /^[A-Za-z0-9_]/.test(trimmed) ? " " : "";
+          const lastIdx = out.length - 1;
+          out[lastIdx] = out[lastIdx]! + separator + trimmed;
+        }
       } else {
         pushBlankLine();
         out.push(trimmed);

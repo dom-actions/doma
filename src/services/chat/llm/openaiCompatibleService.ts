@@ -9,6 +9,7 @@ import {
   type LlmToolCallResult,
 } from './llmTypes';
 import { LlmService } from './llmService';
+import { resolveCompatibleToolChoice } from './toolChoiceCompatibility';
 import {
   materializeToolResultContent,
 } from './contextManager';
@@ -94,6 +95,12 @@ export class OpenAICompatibleService extends LlmService {
       ...history,
     ];
 
+    const toolChoice = resolveCompatibleToolChoice({
+      endpoint: this.completionsUrl,
+      requestedMode: this.consumeToolChoice(),
+      explicitToolChoice: this.extraBody.tool_choice,
+      extraBody: this.extraBody,
+    });
     const requestBody = {
       model: this.model,
       messages,
@@ -101,7 +108,7 @@ export class OpenAICompatibleService extends LlmService {
       max_tokens: 4096,
       stream: true,
       ...this.extraBody,
-      ...(this.consumeToolChoice() === "required" ? { tool_choice: "required" } : {}),
+      tool_choice: toolChoice,
     };
 
     const headers: Record<string, string> = {
