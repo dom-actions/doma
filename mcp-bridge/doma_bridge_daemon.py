@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import struct
@@ -27,13 +28,16 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from xml.sax.saxutils import escape as xml_escape
+
+from bridge_auth import load_or_create_token
 
 SERVER_VERSION = "0.6.2"
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
 BIND_TIMEOUT_SEC = float(os.environ.get("DOMA_BIND_TIMEOUT_SEC", "90"))
+MAX_BRIDGE_MESSAGE_BYTES = 32 * 1024 * 1024
 
 _TASKS: dict[str, dict[str, Any]] = {}
 _REQUESTS: dict[str, dict[str, Any]] = {}
@@ -123,6 +127,28 @@ def _payload(ok: bool, text: str, **extra: Any) -> dict[str, Any]:
     out: dict[str, Any] = {"ok": ok, "text": text}
     out.update(extra)
     return out
+
+
+def _valid_loopback_host(host: str, port: int) -> bool:
+    return host.lower() in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+
+def _valid_extension_origin(origin: str) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in ("chrome-extension", "moz-extension", "safari-web-extension")
+        and bool(parsed.hostname)
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+    )
 
 
 def build_mcp_send_text(task: str, caller_agent: str) -> str:
@@ -735,7 +761,9 @@ def _ws_recv_text(rfile) -> Optional[str]:
         if len(ext) < 8:
             return None
         length = struct.unpack("!Q", ext)[0]
-    mask = rfile.read(4) if masked else b""
+    if not masked or length > MAX_BRIDGE_MESSAGE_BYTES:
+        return None
+    mask = rfile.read(4)
     payload = rfile.read(length) if length else b""
     if length and len(payload) < length:
         return None
@@ -761,13 +789,14 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_GET(self) -> None:
+        if not _valid_loopback_host(self.headers.get("Host", ""), BRIDGE_PORT):
+            self.send_error(403, "Invalid Host")
+            return
+        if not _valid_extension_origin(self.headers.get("Origin", "")):
+            self.send_error(403, "Invalid extension Origin")
+            return
         if self.headers.get("Upgrade", "").lower() != "websocket":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(
-                f"DomA bridge daemon; WebSocket on this port. port={BRIDGE_PORT}\n".encode()
-            )
+            self.send_error(400, "WebSocket upgrade required")
             return
 
         key = self.headers.get("Sec-WebSocket-Key")
@@ -775,6 +804,8 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
             self.send_error(400, "Missing Sec-WebSocket-Key")
             return
 
+        # The upgraded socket is owned by this handler; do not parse another HTTP request.
+        self.close_connection = True
         accept = _ws_accept_key(key)
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
@@ -802,7 +833,10 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
 
         try:
             while True:
-                msg = _ws_recv_text(self.rfile)
+                try:
+                    msg = _ws_recv_text(self.rfile)
+                except OSError:
+                    break
                 if msg is None:
                     break
                 if msg == "":
@@ -850,30 +884,51 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
 
+    def _authorized(self) -> bool:
+        if not _valid_loopback_host(self.headers.get("Host", ""), CONTROL_PORT):
+            self._send_json(403, {"ok": False, "text": "invalid Host", "status": "error"})
+            return False
+        # The control API is for local stdio clients, never browser page JavaScript.
+        if self.headers.get("Origin") is not None:
+            self._send_json(403, {"ok": False, "text": "browser Origin forbidden", "status": "error"})
+            return False
+        expected = f"Bearer {load_or_create_token()}"
+        supplied = self.headers.get("Authorization", "").encode("utf-8")
+        if not hmac.compare_digest(supplied, expected.encode("ascii")):
+            self._send_json(401, {"ok": False, "text": "unauthorized", "status": "error"})
+            return False
+        return True
+
     def _read_json_body(self) -> Any:
-        length = int(self.headers.get("Content-Length") or "0")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as error:
+            raise ValueError("invalid Content-Length") from error
+        if length < 0:
+            raise ValueError("invalid Content-Length")
+        if length > MAX_BRIDGE_MESSAGE_BYTES:
+            raise OverflowError("request body too large")
         if length <= 0:
             return {}
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("incomplete request body")
         try:
             return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             return None
 
     def do_OPTIONS(self) -> None:
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        self.close_connection = True
+        self._send_json(403, {"ok": False, "text": "browser access forbidden", "status": "error"})
 
     def do_GET(self) -> None:
+        if not self._authorized():
+            return
         path = self.path.split("?", 1)[0]
         if path in ("/v1/health", "/health", "/"):
             snap = _agent_snapshot()
@@ -883,6 +938,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "role": "doma-bridge-daemon",
                     "version": SERVER_VERSION,
+                    "authRequired": True,
                     "controlPort": CONTROL_PORT,
                     "bridgePort": BRIDGE_PORT,
                     "bridgeConnected": _extension_connected(),
@@ -901,8 +957,19 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"ok": False, "text": "not found", "status": "error"})
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            return
         path = self.path.split("?", 1)[0]
-        body = self._read_json_body()
+        try:
+            body = self._read_json_body()
+        except OverflowError:
+            self.close_connection = True
+            self._send_json(413, {"ok": False, "text": "request body too large", "status": "error"})
+            return
+        except ValueError as error:
+            self.close_connection = True
+            self._send_json(400, {"ok": False, "text": str(error), "status": "error"})
+            return
         if body is None:
             self._send_json(400, {"ok": False, "text": "invalid JSON body", "status": "error"})
             return

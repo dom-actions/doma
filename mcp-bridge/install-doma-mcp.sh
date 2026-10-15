@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DomA MCP installer — installs stdio + daemon into ~/.doma/mcp
+# DomA MCP installer — installs stdio + daemon + local auth into ~/.doma/mcp
 # Usage:
 #   curl -fsSL https://res.stayfork.app/d/install-doma-mcp.sh | bash
 set -euo pipefail
@@ -8,6 +8,7 @@ BASE_URL="${DOMA_MCP_BASE_URL:-https://res.stayfork.app/d}"
 INSTALL_DIR="${DOMA_MCP_HOME:-$HOME/.doma/mcp}"
 STDIO_URL="${BASE_URL}/doma_mcp_stdio.py"
 DAEMON_URL="${BASE_URL}/doma_bridge_daemon.py"
+AUTH_URL="${BASE_URL}/bridge_auth.py"
 
 echo "[DomA] install dir: $INSTALL_DIR"
 
@@ -184,10 +185,13 @@ echo "[DomA] downloading stdio…"
 download "$STDIO_URL" "$TMP/doma_mcp_stdio.py"
 echo "[DomA] downloading daemon…"
 download "$DAEMON_URL" "$TMP/doma_bridge_daemon.py"
+echo "[DomA] downloading local auth helper…"
+download "$AUTH_URL" "$TMP/bridge_auth.py"
 
 # basic sanity
-"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_mcp_stdio.py" "$TMP/doma_bridge_daemon.py"
+"$PYTHON_BIN" "${PYTHON_PREFIX_ARGS[@]}" -m py_compile "$TMP/doma_mcp_stdio.py" "$TMP/doma_bridge_daemon.py" "$TMP/bridge_auth.py"
 
+install -m 644 "$TMP/bridge_auth.py" "$INSTALL_DIR/bridge_auth.py"
 install -m 755 "$TMP/doma_mcp_stdio.py" "$INSTALL_DIR/doma_mcp_stdio.py"
 install -m 755 "$TMP/doma_bridge_daemon.py" "$INSTALL_DIR/doma_bridge_daemon.py"
 
