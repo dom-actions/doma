@@ -180,6 +180,29 @@ export class LlmService {
         ]);
     }
 
+    /** Notify the UI of a tool failure without changing the model's error flow. */
+    protected async reportToolCallError(
+      conversationId: string,
+      msgId: string,
+      toolCall: any,
+      error: unknown,
+      options: LlmSendMessageOptions,
+    ): Promise<void> {
+      const message = error instanceof Error ? error.message : String(error);
+      const failure: ToolResult & { ok: false; error: string } = {
+        ok: false,
+        error: message,
+        content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
+      };
+      try {
+        await options.onToolCallOverride(conversationId, msgId, toolCall, failure);
+      } catch (callbackError) {
+        console.warn(`[${this.getName()}] Tool failure callback failed:`, callbackError);
+      } finally {
+        options.onToolCallDone(conversationId, msgId, toolCall);
+      }
+    }
+
     async call( _conversationId: string,
         userId: string,
         deviceId: string,
@@ -243,6 +266,7 @@ export class LlmService {
                     } catch (parseErr) {
                       const errMsg =
                         parseErr instanceof Error ? parseErr.message : String(parseErr);
+                      await this.reportToolCallError(_conversationId, sseEvent.msgId!, toolCall, parseErr, options);
                       llmToolCallResults.push({
                         tool_call_id: toolCall.id,
                         result: {
@@ -255,41 +279,46 @@ export class LlmService {
                         },
                         name: toolCall.function.name,
                       });
-                      options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
                       continue;
                     }
                     // 强制以当前会话为准，避免模型误把 tabId 传到 conversationId
                     toolArgs.conversationId = _conversationId;
 
                     let result: unknown;
-                    // Ask 轮：页面/Tab 变更类 tool 直接拒绝（不 callTool），带 instruction 引导切 Agent
-                    if (
-                      isAskModeRound(history) &&
-                      isAskBlockedPageTool(toolCall.function.name, toolArgs)
-                    ) {
-                      result = buildAskPageToolBlockedPayload(
-                        toolCall.function.name,
-                        getLastUserVisibleGoal(history),
-                      );
-                    } else {
-                      const timeoutMs =
-                        typeof toolArgs.timeoutMs === "number" && Number.isFinite(toolArgs.timeoutMs)
-                          ? Math.max(1, Math.floor(toolArgs.timeoutMs))
-                          : 60_000;
-                      const toolResult = (await this.mcpClient.callTool(
-                        {
-                          name: toolCall.function.name,
-                          arguments: toolArgs,
-                        },
-                        undefined,
-                        { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
-                      )) as ToolResult;
-                      const firstContent = toolResult.content[0];
-                      const firstText =
-                        firstContent && firstContent.type === "text" ? firstContent.text : "";
-                      result = firstText.startsWith("__JSON__")
-                        ? JSON.parse(firstText.slice(8))
-                        : firstText;
+                    try {
+                      // Ask 轮：页面/Tab 变更类 tool 直接拒绝（不 callTool），带 instruction 引导切 Agent
+                      if (
+                        isAskModeRound(history) &&
+                        isAskBlockedPageTool(toolCall.function.name, toolArgs)
+                      ) {
+                        result = buildAskPageToolBlockedPayload(
+                          toolCall.function.name,
+                          getLastUserVisibleGoal(history),
+                        );
+                      } else {
+                        const timeoutMs =
+                          typeof toolArgs.timeoutMs === "number" && Number.isFinite(toolArgs.timeoutMs)
+                            ? Math.max(1, Math.floor(toolArgs.timeoutMs))
+                            : 60_000;
+                        const toolResult = (await this.mcpClient.callTool(
+                          {
+                            name: toolCall.function.name,
+                            arguments: toolArgs,
+                          },
+                          undefined,
+                          { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
+                        )) as ToolResult;
+                        const firstContent = toolResult.content[0];
+                        const firstText =
+                          firstContent && firstContent.type === "text" ? firstContent.text : "";
+                        result = firstText.startsWith("__JSON__")
+                          ? JSON.parse(firstText.slice(8))
+                          : firstText;
+                      }
+                    } catch (toolError) {
+                      if ((toolError as { name?: string })?.name === "AbortError" || signal.aborted) throw toolError;
+                      await this.reportToolCallError(_conversationId, sseEvent.msgId!, toolCall, toolError, options);
+                      throw toolError;
                     }
 
                     const overrideResult = await options.onToolCallOverride(
@@ -370,7 +399,7 @@ export class LlmService {
               return;
             }
             console.error(`[${this.getName()}] API call failed:`, e);
-            options.onMessageError(_conversationId, msgId, e as Error);
+            await options.onMessageError(_conversationId, msgId, e as Error);
           }
     }
 
