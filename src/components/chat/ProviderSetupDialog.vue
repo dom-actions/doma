@@ -157,6 +157,36 @@
           </button>
         </div>
 
+        <details class="provider-setup-advanced">
+          <summary>{{ t('chat.providerSetup.advanced') }}</summary>
+          <div class="provider-setup-group">
+            <div class="provider-setup-row provider-setup-row--static provider-setup-row--switch provider-setup-row--in-group">
+              <span id="tool-call-history-label" class="provider-setup-row-title">{{ t('chat.providerSetup.toolCallHistory') }}</span>
+              <button
+                type="button"
+                class="provider-setup-switch"
+                role="switch"
+                aria-labelledby="tool-call-history-label"
+                aria-describedby="tool-call-history-hint"
+                :aria-checked="toolCallDetailsEnabled"
+                :aria-busy="historyPreferenceSaving"
+                :class="{ on: toolCallDetailsEnabled }"
+                :disabled="historyPreferenceLoading || historyPreferenceSaving"
+                @click="toggleToolCallHistory"
+              >
+                <span class="provider-setup-switch-knob" />
+              </button>
+            </div>
+          </div>
+          <p id="tool-call-history-hint" class="provider-setup-hint">{{ t('chat.providerSetup.toolCallHistoryHint') }}</p>
+          <p
+            v-if="historyPreferenceFeedback"
+            class="provider-setup-hint"
+            :class="{ 'provider-setup-error': historyPreferenceFeedback === 'failed' }"
+            role="status"
+          >{{ t(historyPreferenceFeedback === 'failed' ? 'chat.providerSetup.toolCallHistorySaveFailed' : 'chat.providerSetup.toolCallHistorySaved') }}</p>
+        </details>
+
         <div class="provider-setup-actions provider-setup-actions--main">
           <button type="button" class="provider-setup-btn" @click="closeDialog">
             {{ t('chat.providerSetup.ok') }}
@@ -355,7 +385,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import {
   llmManager,
@@ -364,6 +394,11 @@ import {
   type OpenProviderId,
 } from '@/services/chat/llm/entry';
 import ProviderIcon from './ProviderIcon.vue';
+import {
+  loadToolCallDetailsPreference,
+  setToolCallDetailsEnabled,
+  toolCallDetailsEnabled,
+} from '@/services/chat/toolCallHistoryPreference';
 
 const emit = defineEmits<{
   close: [];
@@ -390,7 +425,29 @@ const fetchedModelList = ref<string[]>([]);
 const lastFetchedApiKey = ref('');
 const lastFetchedBaseUrl = ref('');
 const enabledTick = ref(0);
+const historyPreferenceLoading = ref(true);
+const historyPreferenceSaving = ref(false);
+const historyPreferenceFeedback = ref<'saved' | 'failed' | ''>('');
 let autoFetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+onMounted(async () => {
+  await loadToolCallDetailsPreference();
+  historyPreferenceLoading.value = false;
+});
+
+async function toggleToolCallHistory() {
+  if (historyPreferenceLoading.value || historyPreferenceSaving.value) return;
+  historyPreferenceSaving.value = true;
+  historyPreferenceFeedback.value = '';
+  try {
+    await setToolCallDetailsEnabled(!toolCallDetailsEnabled.value);
+    historyPreferenceFeedback.value = 'saved';
+  } catch {
+    historyPreferenceFeedback.value = 'failed';
+  } finally {
+    historyPreferenceSaving.value = false;
+  }
+}
 
 const headerTitle = computed(() => {
   if (view.value === 'pickProvider') return t('chat.providerSetup.selectProvider');
@@ -857,6 +914,25 @@ async function closeDialog() {
   font-weight: 600;
   opacity: 0.8;
 }
+.provider-setup-advanced {
+  margin-top: 14px;
+  summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0.8;
+    padding: 4px 0;
+  }
+  &[open] summary {
+    margin-bottom: 6px;
+  }
+  .provider-setup-row-title {
+    white-space: normal;
+  }
+  .provider-setup-hint {
+    line-height: 1.45;
+  }
+}
 .provider-setup-list {
   display: flex;
   flex-direction: column;
@@ -1151,6 +1227,10 @@ async function closeDialog() {
   transition: background 0.15s ease;
   &.on {
     background: var(--stay-logo, #0d9488);
+  }
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 }
 .provider-setup-switch-knob {

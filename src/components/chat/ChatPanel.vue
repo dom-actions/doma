@@ -523,9 +523,7 @@
           <div
             v-if="
               item.msg.toolBarItems?.length ||
-              getVisibleToolCalls(item.msg.toolCalls).length ||
-              getDoingToolCalls(item.msg.toolCalls).length ||
-              (toolDebug && getDebugToolCalls(item.msg.toolCalls).length)
+              shouldShowToolCallHistory(item.msg)
             "
             class="msg-actions"
           >
@@ -534,9 +532,7 @@
               <div
                 v-if="
                   item.msg.toolBarItems?.length ||
-                  (toolDebug && getDebugToolCalls(item.msg.toolCalls).length) ||
-                  getVisibleToolCalls(item.msg.toolCalls).length ||
-                  getDoingToolCalls(item.msg.toolCalls).length
+                  shouldShowToolCallHistory(item.msg)
                 "
                 class="msg-toolbar"
               >
@@ -571,51 +567,46 @@
 
                 <div
                   v-if="
-                    toolDebug
-                      ? getDebugToolCalls(item.msg.toolCalls).length
-                      : getVisibleToolCalls(item.msg.toolCalls).length
-                        || getDoingToolCalls(item.msg.toolCalls).length
+                    shouldShowToolCallHistory(item.msg)
                   "
                   class="toolcall-header"
                 >
-                <template v-if="toolDebug">
                   <button
                     type="button"
                     class="toolcall-aggregate"
+                    :aria-expanded="isToolCallsExpanded(item.msg.id)"
+                    :aria-controls="`tool-calls-${item.msg.id}`"
+                    :title="t(isToolCallsExpanded(item.msg.id) ? 'chat.toolCall.hideDetails' : 'chat.toolCall.showDetails')"
                     @click="toggleToolCallsExpanded(item.msg.id)"
                   >
-                    <template v-if="getDoingToolCalls(item.msg.toolCalls).length">
-                      <template v-if="getDoingToolCalls(item.msg.toolCalls).length === 1">
-                        {{ t('chat.toolCall.callingOne', { name: getDoingToolCalls(item.msg.toolCalls)[0].name }) }}
-                      </template>
-                      <template v-else>
-                        {{ t('chat.toolCall.callingMany', { count: getDoingToolCalls(item.msg.toolCalls).length }) }}
-                      </template>
-                    </template>
-                    <template v-else>
-                      <span class="toolcall-summary">
-                        {{ t('chat.toolCall.calledTotal', { count: getDebugToolCalls(item.msg.toolCalls).length }) }}
-                      </span>
-                    </template>
+                    <span class="toolcall-summary">
+                      {{ t('chat.toolCall.calledCount', { count: getRecordedToolCalls(item.msg.toolCalls).length }) }}
+                    </span>
                     <ChatChevronForwardSvg
-                      v-if="getDebugToolCalls(item.msg.toolCalls).length"
                       class="chevron"
                       :class="{ expanded: isToolCallsExpanded(item.msg.id) }"
                     />
                   </button>
-                </template>
-                <template v-else>
+                  <button
+                    type="button"
+                    class="msg-action-icon-btn toolcall-copy-btn"
+                    :title="t(toolCallCopyFeedback[item.msg.id] === 'copied' ? 'chat.toolCall.copiedHistory' : 'chat.toolCall.copyHistory')"
+                    :aria-label="t('chat.toolCall.copyHistory')"
+                    @click="onCopyToolCallHistory(item.msg)"
+                  >
+                    <ChatCheckmarkSvg v-if="toolCallCopyFeedback[item.msg.id] === 'copied'" class="toolbar-icon" />
+                    <ChatCopySvg v-else class="toolbar-icon" />
+                  </button>
+                  <span v-if="toolCallCopyFeedback[item.msg.id] === 'failed'" class="toolcall-copy-error" role="status">{{ t('chat.toolCall.copyFailed') }}</span>
+                </div>
+                <div
+                  v-else-if="getVisibleToolCalls(item.msg.toolCalls).length || getDoingToolCalls(item.msg.toolCalls).length"
+                  class="toolcall-header"
+                >
                   <span class="toolcall-aggregate toolcall-aggregate--static">
-                    <template v-if="getDoingToolCalls(item.msg.toolCalls).length">
-                      <span class="toolcall-calling">{{ t('chat.toolCall.callingAgent') }}</span>
-                    </template>
-                    <template v-else>
-                      <span class="toolcall-summary">
-                        {{ t('chat.toolCall.calledCount', { count: getVisibleToolCalls(item.msg.toolCalls).length }) }}
-                      </span>
-                    </template>
+                    <span v-if="getDoingToolCalls(item.msg.toolCalls).length" class="toolcall-calling">{{ t('chat.toolCall.callingAgent') }}</span>
+                    <span v-else class="toolcall-summary">{{ t('chat.toolCall.calledCount', { count: getVisibleToolCalls(item.msg.toolCalls).length }) }}</span>
                   </span>
-                </template>
                 </div>
               </div>
               </div>
@@ -644,24 +635,11 @@
               </div>
             </div>
 
-            <div
-              v-if="toolDebug && isToolCallsExpanded(item.msg.id)"
-              class="toolcall-list"
-            >
-              <div
-                v-for="(tc, ti) in getDebugToolCalls(item.msg.toolCalls)"
-                :key="`${tc.id || tc.name}-${ti}`"
-                class="toolcall-item"
-                :class="{ 'toolcall-item--doing': tc.state === 'doing' }"
-              >
-                <template v-if="tc.state === 'doing'">
-                  {{ t('chat.toolCall.callingOne', { name: tc.name }) }}
-                </template>
-                <template v-else>
-                  {{ tc.name }}
-                </template>
-              </div>
-            </div>
+            <ToolCallDetails
+              v-if="shouldShowToolCallHistory(item.msg) && isToolCallsExpanded(item.msg.id)"
+              :id="`tool-calls-${item.msg.id}`"
+              :calls="getRecordedToolCalls(item.msg.toolCalls)"
+            />
           </div>
           <CustomUIRenderer
             v-if="item.msg.customUi"
@@ -899,6 +877,9 @@ import { llmManager, type LlmProvider, type LlmResponse, DEFAULT_MODELS } from "
 import { chatStorage, newChatMessageId, type StoredConversation, type StoredMessage } from "@/services/chat/chatStorage";
 import CustomUIRenderer from "./CustomUIRenderer.vue";
 import AssistantMessageContent from "./AssistantMessageContent.vue";
+import ToolCallDetails from "./ToolCallDetails.vue";
+import { finishToolCallRecord, interruptToolCallRecord, mergeToolCallRecord, serializeToolCallHistory, startToolCallRecord } from "@/services/chat/toolCallDetails";
+import { loadToolCallDetailsPreference, toolCallDetailsEnabled } from "@/services/chat/toolCallHistoryPreference";
 import ConversationPicker from "./ConversationPicker.vue";
 import ChatComposer from "./composer/ChatComposer.vue";
 import CreateExtensionDescDialog from "./composer/CreateExtensionDescDialog.vue";
@@ -2172,10 +2153,10 @@ const thinking = computed(() => {
   return !!cid && thinkingConversationIds.value.has(cid);
 });
 const expandedToolCalls = ref<Set<string>>(new Set());
-/** 设为 true：展示具体 tool 名，完成后仍保留调用记录 */
-const toolDebug = ref(false);
+
 const isTabRecording = ref(false);
 const copiedToolBarKeys = ref<Set<string>>(new Set());
+const toolCallCopyFeedback = ref<Record<string, 'copied' | 'failed'>>({});
 const cancelled = ref(false);
 const conversationId = ref<string | undefined>(undefined);
 
@@ -2527,7 +2508,7 @@ function mergeToolCallIntoList(
   const list = toolCalls ? [...toolCalls] : [];
   const idx = list.findIndex((t) => t.id === toolCall.id);
   if (idx === -1) list.push(toolCall);
-  else list[idx] = toolCall;
+  else list[idx] = mergeToolCallRecord(list[idx], toolCall);
   return list;
 }
 
@@ -2615,7 +2596,7 @@ async function persistMessageNow(messageId: string): Promise<void> {
   if (!resolved) return;
   const { convId, msg } = resolved;
   const plainToolCalls: ChatMessageToolCall[] = Array.isArray(msg.toolCalls)
-    ? msg.toolCalls.map((t) => ({ id: t.id, name: t.name, state: t.state }))
+    ? JSON.parse(JSON.stringify(msg.toolCalls))
     : [];
   const plainCustomUi = msg.customUi
     ? (JSON.parse(JSON.stringify(msg.customUi)) as Record<string, unknown>)
@@ -4244,7 +4225,7 @@ function shouldShowChatMessageRow(msg: ChatMessage): boolean {
     msg.toolBarItems?.length ||
     getVisibleToolCalls(msg.toolCalls).length ||
     getDoingToolCalls(msg.toolCalls).length ||
-    (toolDebug.value && getDebugToolCalls(msg.toolCalls).length)
+    (toolCallDetailsEnabled.value && getRecordedToolCalls(msg.toolCalls).length)
   );
 }
 
@@ -4444,8 +4425,8 @@ function clearDoingToolCallsOnMessages(msgIds: string[], convId?: string) {
     if (!msg?.toolCalls?.length) return;
     let changed = false;
     for (const tc of msg.toolCalls) {
-      if (tc.state === "doing") {
-        tc.state = "gone";
+      if (tc.state === "doing" || tc.details?.status === "running") {
+        interruptToolCallRecord(tc);
         changed = true;
       }
     }
@@ -4487,8 +4468,8 @@ async function clearDoingToolCallsInIdb(msgIds: string[]): Promise<void> {
       const toolCalls = (existing.toolCalls as ChatMessageToolCall[]).map((t) => ({ ...t }));
       let changed = false;
       for (const tc of toolCalls) {
-        if (tc.state === "doing") {
-          tc.state = "gone";
+        if (tc.state === "doing" || tc.details?.status === "running") {
+          interruptToolCallRecord(tc);
           changed = true;
         }
       }
@@ -4516,8 +4497,7 @@ async function finalizeOffPanelConversationDone(
         : [];
       for (const t of toolCalls) {
         completedToolCalls.push({
-          id: t.id,
-          name: t.name,
+          ...t,
           state: "visible",
         } as ChatMessageToolCall);
       }
@@ -4560,10 +4540,85 @@ async function collectAssistantTextFromMsgIds(msgIds: string[]): Promise<string>
   return parts.join("\n\n").trim();
 }
 
-/** toolDebug：含 doing / gone / visible，完成后仍保留名称 */
-function getDebugToolCalls(toolCalls: ChatMessageToolCall[] | undefined): ChatMessageToolCall[] {
+/** Preserve execution evidence from failed and stopped turns. */
+async function finalizeInterruptedToolCallHistory(
+  convId: string,
+  msgIds: string[],
+  terminalMessageId?: string,
+): Promise<void> {
+  const ids = [...new Set(msgIds)];
+  const enqueue = (id: string, work: () => Promise<void>): Promise<void> => {
+    const previous = messagePersistQueues.get(id) ?? Promise.resolve();
+    const next = previous.catch(() => {}).then(work);
+    messagePersistQueues.set(id, next);
+    return next;
+  };
+  const readMessage = async (id: string): Promise<ChatMessage | undefined> => {
+    const live = resolveMessageForPersist(id);
+    if (live?.convId === convId) return live.msg;
+    const stored = await chatStorage.getMessage(id);
+    return stored?.conversationId === convId ? stored as ChatMessage : undefined;
+  };
+  const persistPatch = async (
+    msg: ChatMessage,
+    patch: Partial<Pick<ChatMessage, "toolCalls" | "toolBarItems">>,
+  ): Promise<void> => {
+    const live = resolveMessageForPersist(msg.id);
+    if (live?.convId === convId) {
+      messagePersistConvById.set(msg.id, convId);
+      Object.assign(live.msg, patch);
+      // Also recreates a terminal notice whose initial addMessage failed to persist.
+      await persistMessageNow(msg.id);
+    } else if (!await chatStorage.updateMessage(msg.id, patch)) {
+      throw new Error(`Tool history message is no longer stored: ${msg.id}`);
+    } else {
+      // readMessage verified stored ownership; never relabel an unverified source id.
+      messagePersistConvById.set(msg.id, convId);
+    }
+  };
+  const sources: ChatMessage[] = [];
+  let calls: ChatMessageToolCall[] = [];
+  for (const id of ids) {
+    await enqueue(id, async () => {
+      const source = await readMessage(id);
+      if (!source) return;
+      sources.push(source);
+      const toolCalls = (source.toolCalls ?? []).map((original) => {
+        const call: ChatMessageToolCall = JSON.parse(JSON.stringify(original));
+        interruptToolCallRecord(call);
+        return call;
+      });
+      for (const call of getRecordedToolCalls(toolCalls)) {
+        calls = mergeToolCallIntoList(calls, call);
+      }
+      // Keep source evidence, but only the terminal summary owns the visible history entry.
+      if (toolCalls.length) await persistPatch(source, { toolCalls });
+    });
+  }
+  if (!calls.length) return;
+  const target = (terminalMessageId ? await readMessage(terminalMessageId) : undefined)
+    ?? sources[sources.length - 1];
+  if (!target) return;
+
+  await enqueue(target.id, async () => {
+    const current = await readMessage(target.id);
+    if (!current) throw new Error(`Tool history terminal message is missing: ${target.id}`);
+    await persistPatch(current, {
+      toolCalls: calls.map((call) => ({ ...call, state: "visible" })),
+      toolBarItems: [{ type: "copy", msgIds: [...new Set([...ids, target.id])] }],
+    });
+  });
+}
+
+function getRecordedToolCalls(toolCalls: ChatMessageToolCall[] | undefined): ChatMessageToolCall[] {
   if (!toolCalls?.length) return [];
   return toolCalls.filter((t) => typeof t.name === "string" && t.name.trim());
+}
+
+/** Only terminal summaries expose saved execution records. */
+function shouldShowToolCallHistory(msg: ChatMessage): boolean {
+  return toolCallDetailsEnabled.value && getRecordedToolCalls(msg.toolCalls).length > 0
+    && (!!msg.toolBarItems?.length || getVisibleToolCalls(msg.toolCalls).length > 0);
 }
 
 /** assistant 仅 tool 脚手架（gone、无正文）时不占气泡位，避免 tool 完成后留空行 */
@@ -4571,7 +4626,6 @@ function isRenderableChatMessage(msg: ChatMessage): boolean {
   if (msg.role === "user") return true;
   if (msg.customUi) return true;
   if (msg.toolBarItems?.length) return true;
-  if (getDoingToolCalls(msg.toolCalls).length > 0) return true;
   if (getVisibleToolCalls(msg.toolCalls).length > 0) return true;
   if (String(msg.content ?? "").trim()) return true;
   return false;
@@ -4582,6 +4636,7 @@ function isToolCallsExpanded(messageId: string): boolean {
 }
 
 function toggleToolCallsExpanded(messageId: string) {
+  if (!toolCallDetailsEnabled.value) return;
   if (expandedToolCalls.value.has(messageId)) {
     expandedToolCalls.value.delete(messageId);
   } else {
@@ -4912,6 +4967,7 @@ const onKeydownChange = (e: KeyboardEvent) => {
 };
 
 onMounted(() => {
+  void loadToolCallDetailsPreference();
   console.log("[ChatPanel] mount-1 begin", { safari: IS_SAFARI_EXT });
   exitInlineBubbleEdit();
   addRuntimeListener();
@@ -5075,9 +5131,9 @@ function notifySwResetToolAbort(cid: string) {
 
 async function stopTask(
   message?: string | Event,
-  options?: { skipAssistantMessage?: boolean },
+  options?: { skipAssistantMessage?: boolean; conversationId?: string; status?: "error" },
 ) {
-  const cid = conversationId.value;
+  const cid = options?.conversationId ?? conversationId.value;
   try {
     if (cid) abortControllersByConversation.get(cid)?.abort();
   } catch {
@@ -5089,14 +5145,16 @@ async function stopTask(
     setConversationLoading(cid, false);
     setConversationThinking(cid, false);
   }
-  cancelled.value = true;
+  if (options?.status !== "error") cancelled.value = true;
   const msg = typeof message === "string" ? message : undefined;
+  let terminalMessageId: string | undefined;
   if (cid && !options?.skipAssistantMessage) {
-    await addMessage(cid, "assistant", msg || t("chat.taskStopped"));
+    terminalMessageId = await addMessage(cid, "assistant", msg || t("chat.taskStopped"));
   }
   if (cid) {
     safariShellOnStop(cid, msg || t("chat.taskStopped"));
   }
+  return terminalMessageId;
 }
 
 /** 丢掉已流式写入的助手气泡（会员软失败等） */
@@ -6723,7 +6781,7 @@ function upsertAssistantMessage(
       const toolCalls = msg.toolCalls ?? (msg.toolCalls = []);
       const toolCallIdx = toolCalls.findIndex((t) => t.id === toolCall.id);
       if (toolCallIdx === -1) toolCalls.push(toolCall);
-      else toolCalls[toolCallIdx] = toolCall;
+      else toolCalls[toolCallIdx] = mergeToolCallRecord(toolCalls[toolCallIdx], toolCall);
     }
     if (customUi) msg.customUi = customUi;
   }
@@ -6758,11 +6816,11 @@ function upsertAssistantMessage(
 
 async function copyToClipboard(text: string) {
   const t = text ?? "";
-  if (!t) return;
+  if (!t) return false;
   try {
     if (navigator?.clipboard?.writeText) {
       await navigator.clipboard.writeText(t);
-      return;
+      return true;
     }
   } catch {
     // fallback below
@@ -6775,8 +6833,24 @@ async function copyToClipboard(text: string) {
   document.body.appendChild(ta);
   ta.focus();
   ta.select();
-  document.execCommand("copy");
-  document.body.removeChild(ta);
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+async function onCopyToolCallHistory(msg: ChatMessage): Promise<void> {
+  if (!toolCallDetailsEnabled.value) return;
+  const ok = await copyToClipboard(serializeToolCallHistory(getRecordedToolCalls(msg.toolCalls)));
+  toolCallCopyFeedback.value = { ...toolCallCopyFeedback.value, [msg.id]: ok ? 'copied' : 'failed' };
+  window.setTimeout(() => {
+    const next = { ...toolCallCopyFeedback.value };
+    delete next[msg.id];
+    toolCallCopyFeedback.value = next;
+  }, 1800);
 }
 
 async function onToolBarItemClick(item: ChatMessageToolBarItem) {
@@ -7659,6 +7733,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
 
   try {
 
+    const turnMessageIds: string[] = [];
+    let turnHadError = false;
     const abortController = new AbortController();
     const site = await resolveSiteHost(opts);
     abortControllersByConversation.set(persistConvId, abortController);
@@ -7676,6 +7752,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
       swPingOk: ping.ok,
       swPingMs: ping.elapsedMs,
     });
+    // Keep capture consistent for this turn when another panel changes the preference.
+    const captureToolCallDetails = toolCallDetailsEnabled.value;
     llmManager.sendMessage(
       persistConvId,
       llmSendText, {
@@ -7701,13 +7779,10 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
           toolName: toolCall.function.name,
         });
         setConversationThinking(convId, false);
-        upsertAssistantMessage(convId, msgId, '', {
-          id: toolCall.id,
-          name: toolCall.function.name,
-          state: 'doing',
-        } as ChatMessageToolCall);
+        upsertAssistantMessage(convId, msgId, '', startToolCallRecord(toolCall, captureToolCallDetails));
       },
       onToolCallOverride: async (convId, msgId, toolCall, result) => {
+        upsertAssistantMessage(convId, msgId, '', finishToolCallRecord(toolCall, result, captureToolCallDetails));
         // 只要返回里带了 doma_show_alert 字段，就优先走这个流程（不依赖 truthy）
         if (!!result && typeof result === "object" && "doma_show_alert" in (result as any)) {
           const alert = (result as any).doma_show_alert as { type?: string } | undefined;
@@ -7819,6 +7894,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         }
       },
       onMessageStart: (convId, msgId) => {
+        if (!turnMessageIds.includes(msgId)) turnMessageIds.push(msgId);
         if (convId === conversationId.value) {
           activeStreamMsgId.value = msgId;
         }
@@ -7832,10 +7908,11 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         }
         setConversationThinking(convId, false);
         if (convId === conversationId.value) {
-          void persistMessageNow(msgId);
+          queueMessagePersist(msgId, convId);
         }
       },
       onConversationDone: (convId, msgIds) => {
+        if (turnHadError) return;
         console.log("[tool debug] onConversationDone", { convId, msgIds });
         activeStreamMsgId.value = null;
         const lastMsgId = msgIds[msgIds.length - 1];
@@ -7910,12 +7987,8 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         if (cancelled.value) {
           reportMcpOnce(false, t("chat.taskStopped"), "error");
           void recordScheduledRunResult(convId, msgIds, "cancelled", t("chat.taskStopped"));
-          if (onPanel) {
-            clearDoingToolCallsOnMessages(msgIds, convId);
-            void flushAllMessagePersists();
-          } else {
-            void flushAllMessagePersists().then(() => clearDoingToolCallsInIdb(msgIds));
-          }
+          void finalizeInterruptedToolCallHistory(convId, msgIds).catch((error) =>
+            console.warn("[ChatPanel] cancelled tool history finalization failed", error));
           return;
         }
 
@@ -7928,8 +8001,7 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
               if (msg) {
                 msg.toolCalls.forEach((t) => {
                   completedToolCalls.push({
-                    id: t.id,
-                    name: t.name,
+                    ...t,
                     state: "visible",
                   } as ChatMessageToolCall);
                 });
@@ -7964,7 +8036,20 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
         };
         void finishTurn();
       },
-      onMessageError: async (conversationId, msgId, error) => {
+      onMessageError: async (errorConversationId, msgId, error) => {
+        turnHadError = true;
+        const stopErroredConversation = async (
+          message?: string,
+          options?: { skipAssistantMessage?: boolean },
+        ) => {
+          const terminalMessageId = await stopTask(message, {
+            ...options,
+            conversationId: errorConversationId,
+            status: "error",
+          });
+          try { await finalizeInterruptedToolCallHistory(errorConversationId, turnMessageIds, terminalMessageId); }
+          catch (historyError) { console.warn("[ChatPanel] failed-turn tool history finalization failed", historyError); }
+        };
         if (isHttpError(error)) {
           await sendEdition.handleHttpError(
             {
@@ -7973,29 +8058,29 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
               headers: error.headers,
             },
             {
-              conversationId,
+              conversationId: errorConversationId,
               msgId,
               t: (key) => t(key),
               reportError: (text) => {
                 reportMcpOnce(false, text, "error");
                 void recordScheduledRunResult(
-                  conversationId,
+                  errorConversationId,
                   msgId ? [msgId] : [],
                   "error",
                   text,
                 );
               },
-              stopTask,
+              stopTask: stopErroredConversation,
               discardAssistantMessage: async (id) => {
-                await discardAssistantMessageById(conversationId, id);
+                await discardAssistantMessageById(errorConversationId, id);
               },
             },
           );
           return;
         }
         reportMcpOnce(false, error.message, "error");
-        void recordScheduledRunResult(conversationId, msgId ? [msgId] : [], "error", error.message);
-        stopTask(error.message);
+        void recordScheduledRunResult(errorConversationId, msgId ? [msgId] : [], "error", error.message);
+        await stopErroredConversation(error.message);
       }
     }, abortController.signal, { siteHost: site });
   } catch (e) {
@@ -9813,7 +9898,10 @@ defineExpose({
     font-weight: 400;
     color: var(--stay-secondaryFont);
     line-height: 16px;
+    gap: 8px;
   }
+
+  .toolcall-copy-error { font-size: 12px; color: var(--stay-error, #dc2626); }
 
   .toolcall-aggregate {
     border: 0;
@@ -9828,19 +9916,15 @@ defineExpose({
     cursor: pointer;
   }
 
-  .toolcall-aggregate--static {
-    cursor: default;
-  }
-
-  .toolcall-calling {
-    font-weight: 600;
-  }
-
   .toolcall-summary {
     font-size: var(--stay-text-body);
     font-weight: 600;
     color: var(--stay-black);
     line-height: 16px;
+  }
+
+  .toolcall-aggregate--static {
+    cursor: default;
   }
 
   .toolcall-aggregate .chevron {
@@ -9853,24 +9937,6 @@ defineExpose({
 
   .toolcall-aggregate .chevron.expanded {
     transform: rotate(90deg);
-  }
-
-  .toolcall-list {
-    margin-top: 6px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .toolcall-item {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--stay-black);
-
-    &--doing {
-      font-weight: 400;
-      color: var(--stay-secondaryFont);
-    }
   }
 
   .thinking-indicator {

@@ -301,6 +301,7 @@ export class AnthropicClaudeService extends LlmService {
             } catch (parseErr) {
               const errMsg =
                 parseErr instanceof Error ? parseErr.message : String(parseErr);
+              await this.reportToolCallError(_conversationId, sseEvent.msgId!, toolCall, parseErr, options);
               llmToolCallResults.push({
                 tool_call_id: toolCall.id,
                 result: {
@@ -313,40 +314,45 @@ export class AnthropicClaudeService extends LlmService {
                 },
                 name: toolCall.function.name,
               });
-              options.onToolCallDone(_conversationId, sseEvent.msgId!, toolCall);
               continue;
             }
             toolArgs.conversationId = _conversationId;
 
             let result: unknown;
-            if (
-              isAskModeRound(claudeHistory) &&
-              isAskBlockedPageTool(toolCall.function.name, toolArgs)
-            ) {
-              result = buildAskPageToolBlockedPayload(
-                toolCall.function.name,
-                getLastUserVisibleGoal(claudeHistory),
-              );
-            } else {
-              const timeoutMs =
-                typeof toolArgs.timeoutMs === 'number' &&
-                Number.isFinite(toolArgs.timeoutMs)
-                  ? Math.max(1, Math.floor(toolArgs.timeoutMs))
-                  : 60_000;
-              const toolResult = (await this.mcpClient.callTool(
-                {
-                  name: toolCall.function.name,
-                  arguments: toolArgs,
-                },
-                undefined,
-                { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
-              )) as ToolResult;
-              const firstContent = toolResult.content[0];
-              const firstText =
-                firstContent && firstContent.type === 'text' ? firstContent.text : '';
-              result = firstText.startsWith('__JSON__')
-                ? JSON.parse(firstText.slice(8))
-                : firstText;
+            try {
+              if (
+                isAskModeRound(claudeHistory) &&
+                isAskBlockedPageTool(toolCall.function.name, toolArgs)
+              ) {
+                result = buildAskPageToolBlockedPayload(
+                  toolCall.function.name,
+                  getLastUserVisibleGoal(claudeHistory),
+                );
+              } else {
+                const timeoutMs =
+                  typeof toolArgs.timeoutMs === 'number' &&
+                  Number.isFinite(toolArgs.timeoutMs)
+                    ? Math.max(1, Math.floor(toolArgs.timeoutMs))
+                    : 60_000;
+                const toolResult = (await this.mcpClient.callTool(
+                  {
+                    name: toolCall.function.name,
+                    arguments: toolArgs,
+                  },
+                  undefined,
+                  { timeout: timeoutMs, maxTotalTimeout: timeoutMs },
+                )) as ToolResult;
+                const firstContent = toolResult.content[0];
+                const firstText =
+                  firstContent && firstContent.type === 'text' ? firstContent.text : '';
+                result = firstText.startsWith('__JSON__')
+                  ? JSON.parse(firstText.slice(8))
+                  : firstText;
+              }
+            } catch (toolError) {
+              if ((toolError as { name?: string })?.name === 'AbortError' || signal.aborted) throw toolError;
+              await this.reportToolCallError(_conversationId, sseEvent.msgId!, toolCall, toolError, options);
+              throw toolError;
             }
 
             const overrideResult = await options.onToolCallOverride(
@@ -433,7 +439,7 @@ export class AnthropicClaudeService extends LlmService {
         return;
       }
       console.error(`[${this.getName()}] API call failed:`, e);
-      options.onMessageError(_conversationId, msgId, e as Error);
+      await options.onMessageError(_conversationId, msgId, e as Error);
     }
   }
 
