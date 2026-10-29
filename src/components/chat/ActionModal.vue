@@ -131,11 +131,12 @@ function onOk() {
 
 <style scoped lang="less">
 .action-modal {
+  /* 挂在 `.chat-panel-action-modals`；容器 bottom 已对齐输入上沿 / 面板底 */
   position: absolute;
   left: 10px;
   right: 10px;
-  bottom: 100%;
-  margin-bottom: 15px;
+  bottom: 0;
+  margin-bottom: 0;
   padding: 18px 18px 16px;
   background: var(--stay-backgroundSecondary, #fff);
   border: 1px solid var(--stay-border, #e0e0e0);

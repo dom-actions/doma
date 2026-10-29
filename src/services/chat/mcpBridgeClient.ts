@@ -53,10 +53,30 @@ export type McpBridgeCloseMessage = {
   callerAgent?: string;
 };
 
+/** Direct-control: create group + status bubble only (no DomA LLM send). */
+export type McpBridgeDirectSessionMessage = {
+  type: "directSession";
+  requestId: string;
+  sendText: string;
+  callerAgent?: string;
+};
+
+/** Direct-control: run one browser tool in the extension (no DomA LLM). */
+export type McpBridgeToolCallMessage = {
+  type: "toolCall";
+  requestId: string;
+  conversationId: string;
+  name: string;
+  arguments?: Record<string, unknown>;
+  callerAgent?: string;
+};
+
 export type McpBridgeInboundMessage =
   | McpBridgeTaskMessage
   | McpBridgeFollowUpMessage
-  | McpBridgeCloseMessage;
+  | McpBridgeCloseMessage
+  | McpBridgeDirectSessionMessage
+  | McpBridgeToolCallMessage;
 
 export type McpBridgeOutboundMessage =
   | { type: "hello"; role: "extension"; version?: string }
@@ -69,6 +89,18 @@ export type McpBridgeOutboundMessage =
       ok: boolean;
       text: string;
       status: "done" | "error";
+    }
+  | {
+      type: "mcpMode";
+      directControl: boolean;
+      browserTools?: unknown[];
+    }
+  | {
+      type: "toolResult";
+      requestId: string;
+      ok: boolean;
+      text?: string;
+      result?: unknown;
     };
 
 type InboundHandler = (msg: McpBridgeInboundMessage) => void | Promise<void>;
@@ -85,6 +117,8 @@ type BridgeSlot = {
 const KEEPALIVE_INTERVAL_MS = 20_000;
 
 let taskHandler: InboundHandler | null = null;
+/** Fired when MCP (:3847) socket becomes ready (after daemon hello). */
+let onMcpPortConnected: (() => void) | null = null;
 let stopped = false;
 /** Ports currently allowed to connect / reconnect (empty = none). */
 let enabledPorts = new Set<number>();
@@ -277,6 +311,36 @@ export function sendMcpBridgeOutbound(msg: McpBridgeOutboundMessage): boolean {
   return sendOn(resolveReplySocket({ requestId, conversationId }), msg);
 }
 
+/** Push direct-control mode + optional browser tool catalog to the MCP daemon (:3847). */
+export function sendMcpBridgeMode(payload: {
+  directControl: boolean;
+  browserTools?: unknown[];
+}): boolean {
+  const slot = getSlot(DOMA_MCP_BRIDGE_PORT);
+  return sendOn(slot?.socket ?? null, {
+    type: "mcpMode",
+    directControl: payload.directControl === true,
+    ...(Array.isArray(payload.browserTools) ? { browserTools: payload.browserTools } : {}),
+  });
+}
+
+export function sendMcpBridgeToolResult(payload: {
+  requestId: string;
+  ok: boolean;
+  text?: string;
+  result?: unknown;
+}): boolean {
+  const rid = payload.requestId.trim();
+  if (!rid) return false;
+  return sendOn(resolveReplySocket({ requestId: rid }), {
+    type: "toolResult",
+    requestId: rid,
+    ok: payload.ok === true,
+    ...(payload.text != null ? { text: payload.text } : {}),
+    ...(payload.result !== undefined ? { result: payload.result } : {}),
+  });
+}
+
 function closeSlot(slot: BridgeSlot) {
   clearReconnectTimer(slot);
   stopKeepAlive(slot);
@@ -296,8 +360,11 @@ function closeSlot(slot: BridgeSlot) {
 export function startMcpBridgeClient(
   onTask: InboundHandler,
   ports: readonly number[] = DOMA_BRIDGE_WS_PORTS,
+  options?: { onMcpConnected?: () => void },
 ): void {
   taskHandler = onTask;
+  onMcpPortConnected =
+    typeof options?.onMcpConnected === "function" ? options.onMcpConnected : null;
   stopped = false;
   const next = new Set(ports.filter((p) => slots.has(p)));
   enabledPorts = next;
@@ -369,6 +436,20 @@ function attachLiveHandlers(slot: BridgeSlot, ws: WebSocket) {
           if (!closeMsg.requestId || !closeMsg.conversationId) return;
           rememberRoute(port, closeMsg.requestId, closeMsg.conversationId);
           await taskHandler?.(closeMsg);
+          return;
+        }
+        if (msg?.type === "directSession") {
+          const direct = msg as unknown as McpBridgeDirectSessionMessage;
+          if (!direct.requestId || !direct.sendText) return;
+          rememberRoute(port, direct.requestId);
+          await taskHandler?.(direct);
+          return;
+        }
+        if (msg?.type === "toolCall") {
+          const toolCall = msg as unknown as McpBridgeToolCallMessage;
+          if (!toolCall.requestId || !toolCall.conversationId || !toolCall.name) return;
+          rememberRoute(port, toolCall.requestId, toolCall.conversationId);
+          await taskHandler?.(toolCall);
         }
       } catch (e) {
         console.warn("[bridge] bad message", port, e);
@@ -499,4 +580,11 @@ async function connectPort(port: number): Promise<void> {
   startKeepAlive(slot);
   const label = port === DOMA_CLI_BRIDGE_PORT ? "cli" : "mcp";
   console.log(`[bridge] connected (${label})`, `ws://127.0.0.1:${port}`);
+  if (port === DOMA_MCP_BRIDGE_PORT && onMcpPortConnected) {
+    try {
+      onMcpPortConnected();
+    } catch (e) {
+      console.warn("[bridge] onMcpConnected failed", e);
+    }
+  }
 }

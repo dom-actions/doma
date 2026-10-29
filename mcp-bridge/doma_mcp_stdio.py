@@ -29,7 +29,7 @@ from bridge_auth import load_or_create_token
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "doma"
-SERVER_VERSION = "0.6.0"
+SERVER_VERSION = "0.7.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
@@ -193,7 +193,8 @@ TOOL_CLOSE_CONVERSATION = {
         "Close an existing DomA conversation by conversationId. "
         "Use when the browser task is finished, the user asks to stop/end the session, "
         "or you no longer need that DomA tab group / chat. "
-        "Requires conversationId from a prior browser_start_group_conversation. "
+        "Requires conversationId from a prior browser_start_group_conversation "
+        "or browser_start_direct_session. "
         "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected }."
     ),
     "inputSchema": {
@@ -202,7 +203,8 @@ TOOL_CLOSE_CONVERSATION = {
             "conversationId": {
                 "type": "string",
                 "description": (
-                    "Required. conversationId returned by browser_start_group_conversation."
+                    "Required. conversationId returned by browser_start_group_conversation "
+                    "or browser_start_direct_session."
                 ),
             },
             "callerAgent": {
@@ -214,12 +216,49 @@ TOOL_CLOSE_CONVERSATION = {
     },
 }
 
-TOOLS = [
+TOOL_START_DIRECT_SESSION = {
+    "name": "browser_start_direct_session",
+    "description": (
+        "PRIMARY tool when DomA MCP is in Direct control mode. "
+        "Creates a DomA tab group + conversation and shows a status bubble in the DomA side panel "
+        "(e.g. “Running: …”). Does NOT run DomA’s own LLM — YOU (Cursor/Claude) must then call "
+        "DomA browser_* tools (navigate, click, screenshot, …) with the returned conversationId, "
+        "and finally browser_close_conversation. "
+        "Prefer this over IDE Playwright/browser tools when you need the user’s real Chrome "
+        "cookies, logins, or extension context. "
+        "Returns JSON: { ok, text, conversationId, status, callerAgent, bridgeConnected, mode }."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": (
+                    "Short natural-language task label shown in DomA’s status bubble, "
+                    'e.g. "Open baidu.com and read the homepage".'
+                ),
+            },
+            "callerAgent": {
+                "type": "string",
+                "description": (
+                    "Calling agent display name (Cursor / Claude / OpenClaw); "
+                    "shown on DomA bubble. Default MCP."
+                ),
+            },
+        },
+        "required": ["task"],
+    },
+}
+
+AGENT_TOOLS = [
     TOOL_START_GROUP_CONVERSATION,
     TOOL_SEND_CONVERSATION_MESSAGE,
     TOOL_GET_CONVERSATION_RESULT,
     TOOL_CLOSE_CONVERSATION,
 ]
+
+# Backward-compatible alias
+TOOLS = AGENT_TOOLS
 
 
 def _send(msg: dict[str, Any]) -> None:
@@ -310,6 +349,24 @@ def _spawn_daemon() -> None:
     print(f"[mcp-stdio] spawned daemon {DAEMON_SCRIPT} (log={log_path})", file=sys.stderr)
 
 
+def _daemon_supports_direct(status: dict[str, Any] | None) -> bool:
+    """0.7.0+ exposes /v1/mcp/catalog and direct-start."""
+    if not status:
+        return False
+    ver = status.get("version")
+    if not isinstance(ver, str) or not ver.strip():
+        return False
+    parts: list[int] = []
+    for bit in ver.strip().split("."):
+        try:
+            parts.append(int(bit))
+        except ValueError:
+            parts.append(0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3]) >= (0, 7, 0)
+
+
 def ensure_daemon() -> None:
     """MCP clients own daemon lifecycle: auto-start, and replace outdated instances."""
     status = _health_status()
@@ -325,6 +382,13 @@ def ensure_daemon() -> None:
                 "DomA bridge daemon is outdated and could not be stopped automatically "
                 f"(control {CONTROL_BASE})"
             )
+    if status and not _daemon_supports_direct(status):
+        print(
+            f"[mcp-stdio] daemon version {status.get('version')!r} lacks direct-control; replacing…",
+            file=sys.stderr,
+        )
+        _stop_daemon()
+        status = _health_status()
     if status:
         return
     print("[mcp-stdio] daemon not up; starting…", file=sys.stderr)
@@ -434,6 +498,76 @@ def call_close(args: dict[str, Any]) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+def call_direct_start(args: dict[str, Any]) -> str:
+    ensure_daemon()
+    name = args.get("callerAgent")
+    if isinstance(name, str) and name.strip():
+        global AGENT_NAME
+        AGENT_NAME = name.strip()[:64]
+    _heartbeat_once()
+    out = _http_json(
+        "POST",
+        f"{CONTROL_BASE}/v1/conversations/direct-start",
+        {
+            "task": args.get("task"),
+            "callerAgent": AGENT_NAME,
+            "clientId": CLIENT_ID,
+        },
+        timeout=BIND_HTTP_TIMEOUT,
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def call_browser_tool(name: str, args: dict[str, Any]) -> str:
+    ensure_daemon()
+    _heartbeat_once()
+    out = _http_json(
+        "POST",
+        f"{CONTROL_BASE}/v1/tools/call",
+        {
+            "name": name,
+            "arguments": args,
+            "conversationId": args.get("conversationId"),
+            "callerAgent": AGENT_NAME,
+            "clientId": CLIENT_ID,
+        },
+        timeout=float(os.environ.get("DOMA_TOOL_CALL_TIMEOUT_SEC", "120")) + 15.0,
+    )
+    return json.dumps(out, ensure_ascii=False)
+
+
+def fetch_tool_catalog() -> list[dict[str, Any]]:
+    """Dynamic tools/list: agent (4 tools) vs direct (start_direct + close + browser_*)."""
+    ensure_daemon()
+    try:
+        cat = _http_json("GET", f"{CONTROL_BASE}/v1/mcp/catalog", timeout=5.0)
+    except Exception as e:
+        print(f"[mcp-stdio] catalog fetch failed, fallback agent tools: {e}", file=sys.stderr)
+        return list(AGENT_TOOLS)
+
+    if cat.get("directControl") is True:
+        tools: list[dict[str, Any]] = [TOOL_START_DIRECT_SESSION, TOOL_CLOSE_CONVERSATION]
+        for item in cat.get("browserTools") or []:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            # Session orchestration tools stay dedicated; do not double-list.
+            if name in {
+                "browser_start_group_conversation",
+                "browser_start_direct_session",
+                "browser_send_conversation_message",
+                "browser_get_conversation_result",
+                "browser_close_conversation",
+            }:
+                continue
+            tools.append(item)
+        return tools
+
+    return list(AGENT_TOOLS)
+
+
 def _heartbeat_once() -> None:
     try:
         _http_json(
@@ -483,7 +617,12 @@ def handle_request(msg: dict[str, Any]) -> None:
         return
 
     if method == "tools/list":
-        _reply(req_id, {"tools": TOOLS})
+        try:
+            tools = fetch_tool_catalog()
+        except Exception as e:
+            print(f"[mcp-stdio] tools/list failed: {e}", file=sys.stderr)
+            tools = list(AGENT_TOOLS)
+        _reply(req_id, {"tools": tools})
         return
 
     if method == "tools/call":
@@ -494,12 +633,16 @@ def handle_request(msg: dict[str, Any]) -> None:
         try:
             if name == "browser_start_group_conversation":
                 text = call_start(args)
+            elif name == "browser_start_direct_session":
+                text = call_direct_start(args)
             elif name == "browser_send_conversation_message":
                 text = call_send(args)
             elif name == "browser_get_conversation_result":
                 text = call_get(args)
             elif name == "browser_close_conversation":
                 text = call_close(args)
+            elif isinstance(name, str) and name.startswith("browser_"):
+                text = call_browser_tool(name, args)
             else:
                 _reply_error(req_id, -32601, f"Unknown tool: {name}")
                 return

@@ -2240,31 +2240,13 @@ async function annotateInteractiveElements(
   };
 
   try {
-    // 探测所有 frame（主页面 + iframe），加 3 秒超时
-    let frameIds: number[] = [0];
-    try {
-      const probe = await execWithTimeout(
-        (getContext().browser.scripting as any).executeScript({
-          target: { tabId, allFrames: true },
-          func: () => true,
-        }),
-        3000,
-        null,
-      );
-      if (probe && (probe as any[]).length > 0) {
-        frameIds = (probe as any[])
-          .map((r: any) => r.frameId as number)
-          .sort((a: number, b: number) => a - b)
-          .slice(0, 5); // 最多处理 5 个 frame，避免 iframe 密集页面卡死
-      }
-    } catch { /* 回退到仅主 frame */ }
+    /**
+     * 只标主 frame。
+     * 百度等站 allFrames probe / 多 iframe 注入：单帧 executeScript 超时后 Chrome 仍占用
+     * 该 tab 的 scripting 队列，后续 compressImageInTab 会被拖到数十秒（看起来像 withLabels 很慢）。
+     */
+    const frameIds: number[] = [0];
 
-    // 区域二次标注：仅主 frame，避免 iframe 坐标系混乱
-    if (clipRect) {
-      frameIds = [0];
-    }
-
-    // 逐个 frame 注入标注，编号连续；每帧最多等 4 秒
     let startIdx = 1;
     const allMappings: unknown[] = [];
     let allAreas: SomOverflowArea[] = [];
@@ -2280,11 +2262,10 @@ async function annotateInteractiveElements(
               startIdx,
               fid === 0 ? clipRect : null,
               SOM_MAX_ELEMENTS,
-              // 仅主 frame 生成 Ax；区域截图模式不再套娃
               fid === 0 && !clipRect ? SOM_MAX_OVERFLOW_AREAS : 0,
             ],
           }),
-          4000,
+          3500,
           null,
         );
         const raw = (results as any)?.[0]?.result;
@@ -6191,7 +6172,7 @@ async function browser_press_key_index(args: Record<string, unknown>): Promise<u
 // ========== 截图 ==========
 
 /** 后台 tab html2canvas 易被浏览器限速，需比 active tab 更长等待 */
-const INACTIVE_TAB_CAPTURE_TIMEOUT_MS = 60_000;
+const INACTIVE_TAB_CAPTURE_TIMEOUT_MS = 12_000;
 const SCREENSHOT_CAPTURE_SCRIPT_FILE = "source/inject/screenshot.capture.js";
 const TAB_CAPTURE_READY_TIMEOUT_MS = 30_000;
 
@@ -6646,6 +6627,14 @@ type ScreenshotCaptureOptions = CompressImageOptions & {
   somOverlay?: SomOverlayPayload | null;
 };
 
+const CAPTURE_VISIBLE_TAB_TIMEOUT_MS = 15_000;
+const COMPRESS_IN_TAB_TIMEOUT_MS = 12_000;
+/** 整次 browser_screenshot 上限；超时必须释放 screenshotCaptureChain，避免后续调用全堵死。 */
+const SCREENSHOT_TOTAL_TIMEOUT_MS = 28_000;
+
+/** 避免直控 MCP 并发多次 screenshot 互相卡住 captureVisibleTab / 页内压缩。 */
+let screenshotCaptureChain: Promise<unknown> = Promise.resolve();
+
 /**
  * 在标签页中将图片压缩为 JPEG；可选叠加 SoM 标注（som-post-composite-v1）。
  * 坐标：元素 rc / areas 为 CSS viewport px，按 window.innerWidth/Height → 最终 canvas 映射。
@@ -6663,7 +6652,7 @@ async function compressImageInTab(
   const overlay = somOverlay ?? { elements: [], areas: [] };
   const hasOverlay = overlay.elements.length > 0 || overlay.areas.length > 0;
 
-  const results = await (getContext().browser.scripting as any).executeScript({
+  const scriptCall = (getContext().browser.scripting as any).executeScript({
     target: { tabId },
     func: (
       imgDataUrl: string,
@@ -6906,7 +6895,22 @@ async function compressImageInTab(
     args: [dataUrl, maxWidth, jpegQuality, grayscale, downscale, overlay, hasOverlay, SOM_POST_COMPOSITE_TAG],
   });
 
-  return results?.[0]?.result || dataUrl;
+  // 12306/百度等重页：页内 Canvas+SoM 合成的 executeScript Promise 可能永不回；超时回退原图。
+  const raced = await execWithTimeout(
+    scriptCall,
+    COMPRESS_IN_TAB_TIMEOUT_MS,
+    null as Awaited<typeof scriptCall> | null,
+  );
+  if (!raced) {
+    logScreenshot("compressImageInTab:timeout", {
+      tabId,
+      timeoutMs: COMPRESS_IN_TAB_TIMEOUT_MS,
+      hasOverlay,
+      dataUrlLen: dataUrl.length,
+    });
+    return dataUrl;
+  }
+  return raced?.[0]?.result || dataUrl;
 }
 
 type ScreenshotCaptureResult =
@@ -7054,16 +7058,33 @@ async function finalizeScreenshotDataUrl(
 }
 
 async function captureVisibleTabRaw(windowId: number): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    getContext().browser.tabs.captureVisibleTab(windowId, {
-      format: "jpeg",
-      quality: 70,
-    }, (result: string) => {
-      const lastError = getContext().browser.runtime.lastError;
-      if (lastError) reject(new Error(lastError.message || "capture failed"));
-      else resolve(result);
-    });
-  });
+  return Promise.race([
+    new Promise<string>((resolve, reject) => {
+      getContext().browser.tabs.captureVisibleTab(
+        windowId,
+        {
+          format: "jpeg",
+          quality: 70,
+        },
+        (result: string) => {
+          const lastError = getContext().browser.runtime.lastError;
+          if (lastError) reject(new Error(lastError.message || "capture failed"));
+          else resolve(result);
+        },
+      );
+    }),
+    new Promise<string>((_, reject) => {
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `captureVisibleTab timeout after ${CAPTURE_VISIBLE_TAB_TIMEOUT_MS}ms (windowId=${windowId})`,
+            ),
+          ),
+        CAPTURE_VISIBLE_TAB_TIMEOUT_MS,
+      );
+    }),
+  ]);
 }
 
 /** 当前窗口 active tab：captureVisibleTab，画质最佳 */
@@ -7162,7 +7183,15 @@ async function captureScreenshot(
       ...summarizeTabForScreenshotLog(tab),
     });
     if (tab?.active) {
-      return await captureVisibleTabScreenshot(tab, tabId, options);
+      const visible = await captureVisibleTabScreenshot(tab, tabId, options);
+      if (!("error" in visible)) return visible;
+      // 偶发：SW/无手势时 captureVisibleTab 报 activeTab not in effect（有 <all_urls> 也会）。
+      // 与 withLabels 无关；回退 html2canvas，避免直控拿到空图/假成功。
+      logScreenshot("captureScreenshot:visibleTab-fallback", {
+        tabId,
+        error: visible.error,
+      });
+      return await captureInactiveTabViaContentScript(tabId, tab, options);
     }
     return await captureInactiveTabViaContentScript(tabId, tab, options);
   } catch (e) {
@@ -7173,6 +7202,7 @@ async function captureScreenshot(
 }
 
 async function browser_screenshot(args: Record<string, unknown>): Promise<unknown> {
+  const run = async (): Promise<unknown> => {
   const intent = parseScreenshotIntent(args);
   if (!intent.ok) {
     return { ok: false, error: intent.error, hint: intent.hint };
@@ -7214,14 +7244,21 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
   let areas: SomOverflowArea[] = [];
   let blockingOverlay: BlockingOverlayInfo = { present: false };
   let somOverlay: SomOverlayPayload | null = null;
-  if (withLabels) {
+
+  // 标注与截图并行：避免先 annotate 把 tab scripting 队列占满后再 capture/compress。
+  const annotatePromise: Promise<SomAnnotateResult> | null = withLabels
+    ? annotateInteractiveElements(tabId)
+    : null;
+  const capturePromise = captureScreenshot(tabId, { maxWidth });
+
+  if (annotatePromise) {
     const annotateTimeout = new Promise<SomAnnotateResult>((resolve) =>
       setTimeout(
         () => resolve({ elements: [], areas: [], blockingOverlay: { present: false } }),
-        6000,
+        5000,
       ),
     );
-    const annotated = await Promise.race([annotateInteractiveElements(tabId), annotateTimeout]);
+    const annotated = await Promise.race([annotatePromise, annotateTimeout]);
     elements = annotated.elements;
     areas = annotated.areas;
     const rawOv = annotated.blockingOverlay ?? { present: false };
@@ -7255,17 +7292,40 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
     });
   }
 
-  // som-post-composite-v1：先截干净图，压缩阶段 Canvas 合成标注
-  const result = await captureScreenshot(tabId, {
-    maxWidth,
-    ...(somOverlay && (somOverlay.elements.length > 0 || somOverlay.areas.length > 0)
-      ? { somOverlay }
-      : {}),
-  });
+  let result = await capturePromise;
 
-  // 清理可能残留的旧 DOM 视觉层；data-som-idx 保留
+  // 已有干净图时再叠 SoM；压缩超时则仍返回无框截图 + elements（直控可继续 click index）
+  if (
+    !("error" in result) &&
+    somOverlay &&
+    (somOverlay.elements.length > 0 || somOverlay.areas.length > 0)
+  ) {
+    const rawDataUrl = `data:${result.mimeType};base64,${result.base64}`;
+    const composited = await compressImageInTab(
+      tabId,
+      rawDataUrl,
+      {
+        maxWidth,
+        jpegQuality: SOM_SCREENSHOT_PROFILES.full.jpegQuality,
+        downscale: SOM_SCREENSHOT_PROFILES.full.downscale,
+      },
+      somOverlay,
+    );
+    const m = /^data:(image\/\w+);base64,(.+)$/.exec(composited);
+    if (m) {
+      result = {
+        ok: true,
+        mimeType: m[1]!,
+        base64: m[2]!,
+        captureTab: result.captureTab,
+        ...(result.captureSource ? { captureSource: result.captureSource } : {}),
+      };
+    }
+  }
+
+  // 清理可能残留的旧 DOM 视觉层；data-som-idx 保留（短超时，勿阻塞回传）
   if (withLabels) {
-    await removeAnnotationVisuals(tabId);
+    void removeAnnotationVisuals(tabId);
   }
 
   if ("error" in result) {
@@ -7390,7 +7450,12 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
   };
 
   const jevCfg = await loadJevConfig();
-  const jevOn = !!jevCfg.enabled && isJevConfigured(jevCfg);
+  // MCP 直控：调用方大脑自己点/填，禁止再进 Jev 多步/外网 decide（否则像「截图卡住」）。
+  const mcpDirect =
+    args._mcpDirect === true ||
+    args.mcpDirect === true ||
+    args._domaMcpDirect === true;
+  const jevOn = !mcpDirect && !!jevCfg.enabled && isJevConfigured(jevCfg);
   console.log("[jev] screenshot:gate", {
     tabId,
     purpose: intent.purpose,
@@ -7398,6 +7463,7 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
     preferredAction: intent.action ?? null,
     valueKeys: Object.keys(intent.values ?? {}),
     jevOn,
+    mcpDirect,
     enabled: jevCfg.enabled,
     hasKey: isJevConfigured(jevCfg),
     model: jevCfg.model,
@@ -8523,6 +8589,37 @@ async function browser_screenshot(args: Record<string, unknown>): Promise<unknow
     return buildVisionResponse(`jev: API error (${msg}); fell back to vision screenshot.`);
   } finally {
     if (conversationId) endToolAbort(conversationId);
+  }
+  }; // end run()
+
+  const prev = screenshotCaptureChain;
+  let release!: () => void;
+  screenshotCaptureChain = new Promise<void>((r) => {
+    release = r;
+  });
+  // 上一枪若已卡死，最多等一小段再开跑，避免直控永久排队
+  await Promise.race([
+    prev.catch(() => undefined),
+    new Promise<void>((r) => setTimeout(r, 8_000)),
+  ]);
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<Record<string, unknown>>((resolve) => {
+        setTimeout(() => {
+          logScreenshot("browser_screenshot:total-timeout", {
+            timeoutMs: SCREENSHOT_TOTAL_TIMEOUT_MS,
+          });
+          resolve({
+            ok: false,
+            error: `browser_screenshot timed out after ${SCREENSHOT_TOTAL_TIMEOUT_MS}ms`,
+            captureTab: false,
+          });
+        }, SCREENSHOT_TOTAL_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    release();
   }
 }
 

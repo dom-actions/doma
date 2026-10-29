@@ -38,10 +38,11 @@ from xml.sax.saxutils import escape as xml_escape
 
 from bridge_auth import load_or_create_token
 
-SERVER_VERSION = "0.6.3"
+SERVER_VERSION = "0.7.1"
 CONTROL_PORT = int(os.environ.get("DOMA_CONTROL_PORT", "3846"))
 BRIDGE_PORT = int(os.environ.get("DOMA_BRIDGE_PORT", "3847"))
 BIND_TIMEOUT_SEC = float(os.environ.get("DOMA_BIND_TIMEOUT_SEC", "90"))
+TOOL_CALL_TIMEOUT_SEC = float(os.environ.get("DOMA_TOOL_CALL_TIMEOUT_SEC", "120"))
 MAX_BRIDGE_MESSAGE_BYTES = 32 * 1024 * 1024
 
 _CONTROL_HTTP: Optional[ThreadingHTTPServer] = None
@@ -52,6 +53,12 @@ _TASKS: dict[str, dict[str, Any]] = {}
 _REQUESTS: dict[str, dict[str, Any]] = {}
 _REQUEST_TO_CONVERSATION: dict[str, str] = {}
 _TASKS_LOCK = threading.Lock()
+
+# Direct-control mode (source of truth: extension WS mcpMode messages)
+_MODE_LOCK = threading.Lock()
+_DIRECT_CONTROL = False
+_BROWSER_TOOLS: list[dict[str, Any]] = []
+_TOOL_CALLS: dict[str, dict[str, Any]] = {}
 
 _CLIENTS: list[Any] = []
 _CLIENTS_LOCK = threading.Lock()
@@ -187,12 +194,16 @@ def _extension_connected() -> bool:
         return len(_CLIENTS) > 0
 
 
-def _broadcast_task(payload: dict[str, Any]) -> int:
+def _broadcast_task(payload: dict[str, Any], *, fanout: bool = True) -> int:
+    """Send to extension WS clients. toolCall should use fanout=False (last client only)
+    to avoid concurrent duplicate screenshot/captures when multiple sidepanels are open."""
     raw = json.dumps(payload, ensure_ascii=False)
     dead: list[Any] = []
     sent = 0
     with _CLIENTS_LOCK:
         clients = list(_CLIENTS)
+    if not fanout and clients:
+        clients = clients[-1:]
     for client in clients:
         try:
             client.send_text(raw)
@@ -285,6 +296,75 @@ def _resolve_conversation_id(msg: dict[str, Any]) -> Optional[str]:
                 if isinstance(existing, str) and existing.strip():
                     return existing.strip()
     return None
+
+
+def set_direct_control_mode(
+    enabled: bool,
+    browser_tools: Any = None,
+) -> None:
+    global _DIRECT_CONTROL, _BROWSER_TOOLS
+    tools: list[dict[str, Any]] = []
+    if isinstance(browser_tools, list):
+        for item in browser_tools:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                tools.append(item)
+    with _MODE_LOCK:
+        _DIRECT_CONTROL = enabled is True
+        if enabled:
+            _BROWSER_TOOLS = tools
+        else:
+            _BROWSER_TOOLS = []
+    print(
+        f"[daemon] mcpMode directControl={enabled is True} browserTools={len(tools)}",
+        file=sys.stderr,
+    )
+
+
+def get_mcp_catalog() -> dict[str, Any]:
+    with _MODE_LOCK:
+        direct = _DIRECT_CONTROL
+        tools = list(_BROWSER_TOOLS)
+    return {
+        "ok": True,
+        "directControl": direct,
+        "browserTools": tools if direct else [],
+        "bridgeConnected": _extension_connected(),
+        "version": SERVER_VERSION,
+    }
+
+
+def _augment_browser_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    """Ensure conversationId is present so Cursor can bind calls to the direct session."""
+    out = dict(tool)
+    schema = out.get("inputSchema")
+    if not isinstance(schema, dict):
+        schema = {"type": "object", "properties": {}}
+    else:
+        schema = dict(schema)
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        props = {}
+    else:
+        props = dict(props)
+    props["conversationId"] = {
+        "type": "string",
+        "description": (
+            "Required. conversationId returned by browser_start_direct_session "
+            "(binds this tool call to the DomA tab group)."
+        ),
+    }
+    req = schema.get("required")
+    if not isinstance(req, list):
+        req = []
+    else:
+        req = [x for x in req if isinstance(x, str)]
+    if "conversationId" not in req:
+        req = ["conversationId", *req]
+    schema["type"] = schema.get("type") or "object"
+    schema["properties"] = props
+    schema["required"] = req
+    out["inputSchema"] = schema
+    return out
 
 
 def dispatch_to_doma(
@@ -387,6 +467,242 @@ def dispatch_close_to_doma(
         "bridgeConnected": True,
         "clients": n,
     }
+
+
+def start_direct_session(
+    task: Any,
+    caller_agent: Any = None,
+) -> dict[str, Any]:
+    """Create DomA group + conversation + status bubble only (no DomA LLM)."""
+    with _MODE_LOCK:
+        if not _DIRECT_CONTROL:
+            return _payload(
+                False,
+                "直控模式未开启：请在 DomA 侧栏 → 连接器 → MCP 打开「直控模式」后，"
+                "在 Cursor/Claude 中刷新 DomA MCP。",
+                status="error",
+            )
+    if not isinstance(task, str) or not task.strip():
+        return _payload(False, "task 不能为空", status="error")
+
+    caller = _normalize_caller_agent(caller_agent)
+    request_id = str(uuid.uuid4())
+    send_text = build_mcp_send_text(task.strip(), caller)
+    now = time.time()
+    event = threading.Event()
+    with _TASKS_LOCK:
+        _REQUESTS[request_id] = {
+            "requestId": request_id,
+            "conversationId": None,
+            "status": "pending",
+            "ok": False,
+            "text": "",
+            "error": None,
+            "callerAgent": caller,
+            "sendText": send_text,
+            "createdAt": now,
+            "updatedAt": now,
+            "event": event,
+            "direct": True,
+        }
+
+    try:
+        out = dispatch_to_doma(
+            request_id,
+            send_text,
+            [],
+            caller,
+            msg_type="directSession",
+        )
+        if not out.get("ok"):
+            _fail_request(request_id, str(out.get("text") or "提交失败"))
+            return _payload(
+                False,
+                str(out.get("text") or "提交失败"),
+                status="error",
+                callerAgent=caller,
+                bridgeConnected=bool(out.get("bridgeConnected")),
+            )
+
+        if not event.wait(BIND_TIMEOUT_SEC):
+            _fail_request(request_id, "等待 DomA 创建直控会话超时")
+            return _payload(
+                False,
+                "等待 DomA 创建直控会话超时（侧栏未打开或 startGroupSession 失败）",
+                status="error",
+                callerAgent=caller,
+                bridgeConnected=True,
+            )
+
+        with _TASKS_LOCK:
+            req = _REQUESTS.get(request_id) or {}
+            cid = req.get("conversationId")
+            err = req.get("error")
+            status = str(req.get("status") or "pending")
+
+        if not isinstance(cid, str) or not cid.strip():
+            return _payload(
+                False,
+                str(err or "扩展未返回 conversationId"),
+                status="error",
+                callerAgent=caller,
+                bridgeConnected=True,
+            )
+
+        cid = cid.strip()
+        return _payload(
+            True,
+            f"直控会话已就绪（conversationId={cid}）。"
+            "请直接调用 DomA browser_* 工具（带上 conversationId），"
+            "结束后用 browser_close_conversation 关闭。",
+            conversationId=cid,
+            status="running" if status != "error" else "error",
+            callerAgent=caller,
+            bridgeConnected=True,
+            mode="direct",
+        )
+    except Exception as e:
+        _fail_request(request_id, f"执行失败: {e}")
+        return _payload(False, f"执行失败: {e}", status="error", callerAgent=caller)
+
+
+def call_browser_tool(
+    name: Any,
+    arguments: Any = None,
+    conversation_id: Any = None,
+    caller_agent: Any = None,
+) -> dict[str, Any]:
+    """Run one DomA browser tool via the extension (direct-control path)."""
+    with _MODE_LOCK:
+        if not _DIRECT_CONTROL:
+            return _payload(
+                False,
+                "直控模式未开启，无法调用 browser 工具。",
+                status="error",
+            )
+        allowed = {str(t.get("name")) for t in _BROWSER_TOOLS if isinstance(t, dict)}
+
+    if not isinstance(name, str) or not name.strip():
+        return _payload(False, "tool name 不能为空", status="error")
+    tool_name = name.strip()
+    if tool_name.startswith("browser_start_") or tool_name in (
+        "browser_send_conversation_message",
+        "browser_get_conversation_result",
+        "browser_close_conversation",
+    ):
+        return _payload(False, f"不能通过 tools/call 调用会话工具: {tool_name}", status="error")
+    if allowed and tool_name not in allowed:
+        return _payload(
+            False,
+            f"未知或不在直控目录中的工具: {tool_name}",
+            status="error",
+        )
+
+    args = arguments if isinstance(arguments, dict) else {}
+    cid = conversation_id
+    if not (isinstance(cid, str) and cid.strip()):
+        raw_cid = args.get("conversationId")
+        cid = raw_cid if isinstance(raw_cid, str) else ""
+    if not isinstance(cid, str) or not cid.strip():
+        return _payload(False, "conversationId 不能为空", status="error")
+    cid = cid.strip()
+
+    caller = _normalize_caller_agent(caller_agent)
+    request_id = str(uuid.uuid4())
+    tool_args = dict(args)
+    tool_args["conversationId"] = cid
+    event = threading.Event()
+    with _TASKS_LOCK:
+        _TOOL_CALLS[request_id] = {
+            "requestId": request_id,
+            "conversationId": cid,
+            "name": tool_name,
+            "status": "pending",
+            "ok": False,
+            "text": "",
+            "result": None,
+            "event": event,
+            "createdAt": time.time(),
+        }
+        _REQUEST_TO_CONVERSATION[request_id] = cid
+
+    if not _extension_connected():
+        return _payload(
+            False,
+            (
+                "DomA 侧栏未连接本机桥。"
+                f"请打开 DomA 侧栏并启用「MCP 桥接」（桥端口 {BRIDGE_PORT}）。"
+            ),
+            status="error",
+            conversationId=cid,
+            bridgeConnected=False,
+        )
+
+    payload = {
+        "type": "toolCall",
+        "requestId": request_id,
+        "conversationId": cid,
+        "name": tool_name,
+        "arguments": tool_args,
+        "callerAgent": caller,
+    }
+    n = _broadcast_task(payload, fanout=False)
+    if n <= 0:
+        return _payload(
+            False,
+            "扩展曾连接但发送失败，请重试",
+            status="error",
+            conversationId=cid,
+            bridgeConnected=False,
+        )
+
+    if not event.wait(TOOL_CALL_TIMEOUT_SEC):
+        return _payload(
+            False,
+            f"等待工具 {tool_name} 结果超时（{TOOL_CALL_TIMEOUT_SEC}s）",
+            status="error",
+            conversationId=cid,
+            bridgeConnected=True,
+        )
+
+    with _TASKS_LOCK:
+        rec = _TOOL_CALLS.pop(request_id, None) or {}
+    ok = bool(rec.get("ok"))
+    text = str(rec.get("text") or "")
+    result = rec.get("result")
+    out: dict[str, Any] = {
+        "ok": ok,
+        "text": text or ("ok" if ok else "tool failed"),
+        "status": "done" if ok else "error",
+        "conversationId": cid,
+        "tool": tool_name,
+        "bridgeConnected": True,
+        "callerAgent": caller,
+        "mode": "direct",
+    }
+    if result is not None:
+        out["result"] = result
+    return out
+
+
+def _apply_tool_result(data: dict[str, Any]) -> None:
+    rid = data.get("requestId")
+    if not isinstance(rid, str) or not rid.strip():
+        return
+    rid = rid.strip()
+    with _TASKS_LOCK:
+        rec = _TOOL_CALLS.get(rid)
+        if not rec:
+            return
+        rec["ok"] = data.get("ok") is True
+        if isinstance(data.get("text"), str):
+            rec["text"] = data["text"]
+        if "result" in data:
+            rec["result"] = data.get("result")
+        rec["status"] = "done" if rec["ok"] else "error"
+        event = rec.get("event")
+    if isinstance(event, threading.Event):
+        event.set()
 
 
 def start_group_conversation(
@@ -862,6 +1178,11 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                 elif typ == "keepalive":
                     # Sidepanel keepalive ping; no state change.
                     pass
+                elif typ == "mcpMode":
+                    set_direct_control_mode(
+                        data.get("directControl") is True,
+                        data.get("browserTools"),
+                    )
                 elif typ == "accepted":
                     rid = data.get("requestId")
                     cid = data.get("conversationId")
@@ -875,6 +1196,8 @@ class BridgeWSHandler(BaseHTTPRequestHandler):
                     _apply_extension_result({**data, "status": "running"})
                 elif typ == "result":
                     _apply_extension_result(data)
+                elif typ == "toolResult":
+                    _apply_tool_result(data)
         finally:
             with _CLIENTS_LOCK:
                 if self in _CLIENTS:
@@ -941,6 +1264,7 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path in ("/v1/health", "/health", "/"):
             snap = _agent_snapshot()
+            catalog = get_mcp_catalog()
             self._send_json(
                 200,
                 {
@@ -953,12 +1277,27 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                     "bridgeConnected": _extension_connected(),
                     "agentCount": snap["agentCount"],
                     "agents": snap["agents"],
+                    "directControl": catalog.get("directControl") is True,
+                    "browserToolCount": len(catalog.get("browserTools") or []),
+                },
+            )
+            return
+        if path == "/v1/mcp/catalog":
+            catalog = get_mcp_catalog()
+            tools = catalog.get("browserTools") or []
+            if catalog.get("directControl"):
+                tools = [_augment_browser_tool_schema(t) for t in tools if isinstance(t, dict)]
+            self._send_json(
+                200,
+                {
+                    **catalog,
+                    "browserTools": tools,
                 },
             )
             return
         if path.startswith("/v1/conversations/"):
             cid = unquote(path[len("/v1/conversations/") :].strip("/"))
-            if not cid or cid in ("start", "message", "close"):
+            if not cid or cid in ("start", "message", "close", "direct-start"):
                 self._send_json(404, {"ok": False, "text": "not found", "status": "error"})
                 return
             self._send_json(200, get_conversation_result(cid))
@@ -1006,6 +1345,18 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, result)
             return
 
+        if path == "/v1/conversations/direct-start":
+            _touch_agent(
+                body.get("clientId") or body.get("callerAgent") or "anonymous",
+                body.get("callerAgent"),
+            )
+            result = start_direct_session(
+                body.get("task"),
+                body.get("callerAgent"),
+            )
+            self._send_json(200, result)
+            return
+
         if path == "/v1/conversations/message":
             _touch_agent(
                 body.get("clientId") or body.get("callerAgent") or "anonymous",
@@ -1026,6 +1377,20 @@ class ControlHTTPHandler(BaseHTTPRequestHandler):
                 body.get("callerAgent"),
             )
             result = close_conversation(
+                body.get("conversationId"),
+                body.get("callerAgent"),
+            )
+            self._send_json(200, result)
+            return
+
+        if path == "/v1/tools/call":
+            _touch_agent(
+                body.get("clientId") or body.get("callerAgent") or "anonymous",
+                body.get("callerAgent"),
+            )
+            result = call_browser_tool(
+                body.get("name"),
+                body.get("arguments"),
                 body.get("conversationId"),
                 body.get("callerAgent"),
             )

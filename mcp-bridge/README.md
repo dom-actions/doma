@@ -12,6 +12,17 @@ Codex / Cursor / Claude / OpenClaw  ──stdio──►  doma_mcp_stdio.py  (ma
                                          DomA extension
 ```
 
+### Agent mode vs Direct control
+
+In the DomA side panel → Connector → **MCP Server**:
+
+| Toggle | MCP `tools/list` | Behavior |
+|--------|------------------|----------|
+| Direct control **off** (default) | `browser_start_group_conversation` / `send` / `get_result` / `close` | DomA’s own LLM runs the task (classic) |
+| Direct control **on** | `browser_start_direct_session` + `browser_close_conversation` + DomA `browser_*` tools | Side panel only shows a status bubble; Cursor/Claude calls browser tools; no DomA model |
+
+`tools/list` is dynamic: stdio asks the daemon (`GET /v1/mcp/catalog`), which mirrors the panel toggle (extension pushes `mcpMode` over the WS). After flipping the toggle, **reload DomA MCP** in Cursor/Claude so the new tool list is picked up.
+
 ## Install (end users)
 
 ```bash

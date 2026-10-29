@@ -28,6 +28,7 @@
         v-show="tab === 'mcp'"
         :open="open && tab === 'mcp'"
         @bridge-enabled-change="(v) => emit('bridge-enabled-change', v)"
+        @direct-control-change="(v) => emit('direct-control-change', v)"
         @bridge-ensure="emit('bridge-ensure')"
       />
       <CliRunnerPanel
@@ -51,6 +52,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: "bridge-enabled-change", enabled: boolean): void;
+  (e: "direct-control-change", enabled: boolean): void;
   (e: "cli-bridge-enabled-change", enabled: boolean): void;
   (e: "bridge-ensure"): void;
 }>();

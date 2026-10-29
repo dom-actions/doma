@@ -355,6 +355,7 @@
             <ConnectorPanel
               :open="showMcp"
               @bridge-enabled-change="onMcpBridgeEnabledChange"
+              @direct-control-change="onMcpDirectControlChange"
               @cli-bridge-enabled-change="onCliBridgeEnabledChange"
               @bridge-ensure="ensureSidepanelMcpBridge"
             />
@@ -795,14 +796,6 @@
           @overlay-boost-change="onComposerOverlayBoostChange"
         />
       </div>
-      <ActionModal
-        v-model:show="showActionModal"
-        :title="actionModalTitle"
-        :buttonText="actionModalButtonText"
-        :inviteCode="actionModalInviteCode"
-        :inviteLabel="actionModalInviteLabel"
-        @action="onActionModalClick"
-      />
     <Teleport to="body">
       <ProviderSetupDialog
           v-if="isOpenEdition() && showProviderSetup"
@@ -811,6 +804,29 @@
         />
       </Teleport>
       </div>
+    </div>
+
+    <!-- 面板级弹层：iPhone 对话态 / iPad·Mac 侧栏都要能看见（底距随输入行抬高） -->
+    <div class="chat-panel-action-modals" :style="actionModalsAnchorStyle">
+      <ActionModal
+        v-model:show="showActionModal"
+        :title="actionModalTitle"
+        :buttonText="actionModalButtonText"
+        :inviteCode="actionModalInviteCode"
+        :inviteLabel="actionModalInviteLabel"
+        @action="onActionModalClick"
+      />
+      <SafariAiDataConsentDialog
+        v-if="IS_SAFARI_EXT"
+        :visible="showSafariAiConsentDialog"
+        :title="t('chat.safariAiConsent.title')"
+        :body="t('chat.safariAiConsent.body')"
+        :privacy-link-label="t('chat.safariAiConsent.privacyLink')"
+        :agree-text="t('chat.safariAiConsent.agree')"
+        :cancel-text="t('chat.safariAiConsent.cancel')"
+        @agree="onSafariAiConsentAgree"
+        @cancel="onSafariAiConsentCancel"
+      />
     </div>
 
     <ChatPanelSlots position="first-chat-prompt" />
@@ -903,6 +919,11 @@ import ConversationPicker from "./ConversationPicker.vue";
 import ChatComposer from "./composer/ChatComposer.vue";
 import CreateExtensionDescDialog from "./composer/CreateExtensionDescDialog.vue";
 import type { CreateExtensionDescConfirmPayload } from "./composer/CreateExtensionDescDialog.vue";
+import SafariAiDataConsentDialog from "./SafariAiDataConsentDialog.vue";
+import {
+  hasSafariAiDataConsent,
+  setSafariAiDataConsent,
+} from "@/services/chat/safariAiDataConsent";
 import QuickMessagesPanel from "./QuickMessagesPanel.vue";
 import OnboardingOverlay from "./OnboardingOverlay.vue";
 import { useChatComposer } from "./composer/useChatComposer";
@@ -943,13 +964,20 @@ import {
   DOMA_MCP_BRIDGE_PORT,
   isMcpBridgeConnected,
   sendMcpBridgeAccepted,
+  sendMcpBridgeMode,
   sendMcpBridgeResult,
   sendMcpBridgeRunning,
+  sendMcpBridgeToolResult,
   startMcpBridgeClient,
   stopMcpBridgeClient,
   type McpBridgeInboundMessage,
 } from "@/services/chat/mcpBridgeClient";
-import { isCliBridgeEnabled, isMcpBridgeEnabled } from "@/services/chat/mcpBridgePrefs";
+import {
+  isCliBridgeEnabled,
+  isMcpBridgeEnabled,
+  isMcpDirectControlEnabled,
+} from "@/services/chat/mcpBridgePrefs";
+import { getMcpTools } from "@/services/chat/llm/toolsDefinition";
 import { prepareUserSendText } from "@/services/chat/interactionBlockSendHints";
 import {
   enrichUserSendTextWithMemories,
@@ -1592,13 +1620,18 @@ function postPhoneComposerActiveToShell(active: boolean) {
   }
 }
 
-function blurPhoneComposerInput() {
+/** 仅去掉输入焦点（不通知 shell），避免同意弹窗打开时被切走输入态 */
+function blurPhoneComposerDomOnly() {
   try {
     const ae = document.activeElement as HTMLElement | null;
     if (ae && typeof ae.blur === "function") ae.blur();
   } catch {
     // ignore
   }
+}
+
+function blurPhoneComposerInput() {
+  blurPhoneComposerDomOnly();
   postPhoneComposerActiveToShell(false);
 }
 
@@ -1918,6 +1951,158 @@ function handleMcpExternalTaskMessage(message: {
 
   void processMcpExternalTask(item);
   return { ok: true };
+}
+
+/**
+ * MCP 直控：只建 group/会话 + 状态气泡，不 send2 / 不跑 DomA 模型。
+ */
+async function processMcpDirectSession(payload: {
+  requestId: string;
+  sendText: string;
+  callerAgent: string;
+}): Promise<void> {
+  const { requestId, callerAgent } = payload;
+  let sendText = normalizeMcpExternalSendText(payload.sendText, callerAgent);
+  const instruction = sendText
+    .replace(/<interactionBlock>[\s\S]*?<\/interactionBlock>/gi, "")
+    .trim();
+  const statusBody = t("chat.mcp.directSessionStatus", {
+    task: instruction || payload.sendText.trim() || "…",
+  });
+  sendText = normalizeMcpExternalSendText(statusBody, callerAgent);
+
+  console.log("[ChatPanel] processMcpDirectSession", {
+    requestId,
+    callerAgent,
+    statusBody,
+  });
+
+  try {
+    await startGroupSession();
+    const cid = conversationId.value;
+    if (!cid) {
+      reportMcpExternalResult({
+        requestId,
+        ok: false,
+        text: "DomA 未能创建会话（conversationId 为空）",
+        status: "error",
+      });
+      return;
+    }
+    reportMcpExternalAccepted({ requestId, conversationId: cid });
+    await addMessage(cid, "user", sendText);
+    // 直控会话保持 running：后续 toolCall 绑在此 conversationId；close 时结束。
+    sendMcpBridgeRunning(cid, statusBody);
+  } catch (e) {
+    reportMcpExternalResult({
+      requestId,
+      conversationId: conversationId.value || undefined,
+      ok: false,
+      text: e instanceof Error ? e.message : String(e),
+      status: "error",
+    });
+  }
+}
+
+async function processMcpToolCall(payload: {
+  requestId: string;
+  targetConversationId: string;
+  name: string;
+  arguments?: Record<string, unknown>;
+  callerAgent?: string;
+}): Promise<void> {
+  const { requestId, targetConversationId, name } = payload;
+  const toolArgs: Record<string, unknown> = {
+    ...(payload.arguments && typeof payload.arguments === "object"
+      ? payload.arguments
+      : {}),
+  };
+  if (toolArgs.conversationId == null || toolArgs.conversationId === "") {
+    toolArgs.conversationId = targetConversationId;
+  }
+  // 直控工具调用：browser_screenshot 等跳过内置 Jev 循环，只返回截图/SoM 给外部大脑。
+  toolArgs._mcpDirect = true;
+
+  console.log("[ChatPanel] processMcpToolCall", {
+    requestId,
+    targetConversationId,
+    name,
+    callerAgent: payload.callerAgent,
+  });
+
+  try {
+    if (conversationId.value !== targetConversationId) {
+      await loadConversation(targetConversationId, "mcp.toolCall");
+    }
+    const res = (await getContext().browser.runtime.sendMessage({
+      origin: "sidepanel",
+      operate: "chat/runBrowserTool",
+      name,
+      toolArgs,
+    })) as { success?: boolean; result?: unknown; error?: string } | undefined;
+
+    if (!res || res.success !== true) {
+      const errText =
+        typeof res?.error === "string" && res.error.trim()
+          ? res.error.trim()
+          : "browser tool failed";
+      sendMcpBridgeToolResult({
+        requestId,
+        ok: false,
+        text: errText,
+      });
+      return;
+    }
+
+    const result = res.result;
+    // browser_screenshot 等常返回 { error: "..." } 但仍走 success:true；直控须当成失败。
+    const resultErr =
+      result &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      typeof (result as { error?: unknown }).error === "string"
+        ? String((result as { error: string }).error).trim()
+        : "";
+    const hasImage =
+      result &&
+      typeof result === "object" &&
+      typeof (result as { base64?: unknown }).base64 === "string" &&
+      String((result as { base64: string }).base64).length > 0;
+    if (resultErr && !hasImage) {
+      sendMcpBridgeToolResult({
+        requestId,
+        ok: false,
+        text: resultErr,
+        result,
+      });
+      return;
+    }
+
+    const text =
+      typeof result === "string"
+        ? result
+        : `__JSON__${JSON.stringify(result ?? null)}`;
+    // 大图只放 text 一份，避免 WS 双倍 payload（text + result 各带 base64）拖死桥。
+    const slimResult =
+      hasImage && result && typeof result === "object"
+        ? {
+            ...(result as Record<string, unknown>),
+            base64: `[omitted ${String((result as { base64: string }).base64).length} chars; see text]`,
+          }
+        : result;
+    sendMcpBridgeToolResult({
+      requestId,
+      ok: true,
+      text,
+      result: slimResult,
+    });
+  } catch (e) {
+    sendMcpBridgeToolResult({
+      requestId,
+      ok: false,
+      text: e instanceof Error ? e.message : String(e),
+    });
+  }
 }
 
 /**
@@ -2778,7 +2963,7 @@ function noteMcpAgentActivity(callerAgent?: string) {
 }
 
 function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
-  noteMcpAgentActivity(msg.callerAgent);
+  noteMcpAgentActivity("callerAgent" in msg ? msg.callerAgent : undefined);
   if (msg.type === "close") {
     handleMcpExternalCloseMessage({
       requestId: msg.requestId,
@@ -2797,12 +2982,42 @@ function onMcpBridgeInbound(msg: McpBridgeInboundMessage) {
     });
     return;
   }
+  if (msg.type === "directSession") {
+    void processMcpDirectSession({
+      requestId: msg.requestId,
+      sendText: msg.sendText,
+      callerAgent: msg.callerAgent || "MCP",
+    });
+    return;
+  }
+  if (msg.type === "toolCall") {
+    void processMcpToolCall({
+      requestId: msg.requestId,
+      targetConversationId: msg.conversationId,
+      name: msg.name,
+      arguments: msg.arguments,
+      callerAgent: msg.callerAgent,
+    });
+    return;
+  }
   handleMcpExternalTaskMessage({
     requestId: msg.requestId,
     sendText: msg.sendText,
     callerAgent: msg.callerAgent,
     attachments: msg.attachments,
   });
+}
+
+async function pushMcpModeToDaemon() {
+  if (!mcpBridgeEnabled.value || !isMcpBridgeConnected(DOMA_MCP_BRIDGE_PORT)) return;
+  try {
+    const direct = await isMcpDirectControlEnabled();
+    const browserTools = direct ? getMcpTools() : [];
+    const ok = sendMcpBridgeMode({ directControl: direct, browserTools });
+    console.log("[ChatPanel] mcpMode pushed", { direct, toolCount: browserTools.length, ok });
+  } catch (e) {
+    console.warn("[ChatPanel] mcpMode push failed", e);
+  }
 }
 
 /** 按开关分别监听 MCP / CLI 本机桥 */
@@ -2817,7 +3032,11 @@ function syncMcpBridgeListening() {
     return;
   }
   console.log("[ChatPanel] bridge listening ON", ports);
-  startMcpBridgeClient(onMcpBridgeInbound, ports);
+  startMcpBridgeClient(onMcpBridgeInbound, ports, {
+    onMcpConnected: () => {
+      void pushMcpModeToDaemon();
+    },
+  });
 }
 
 /** 侧栏存活且 MCP 开关开启时，断线则重连（不经 SW） */
@@ -2836,7 +3055,14 @@ function onMcpBridgeEnabledChange(enabled: boolean) {
   syncMcpBridgeListening();
   if (!mcpBridgeEnabled.value) {
     clearMcpAgentBadge();
+  } else {
+    void pushMcpModeToDaemon();
   }
+}
+
+function onMcpDirectControlChange(_enabled: boolean) {
+  console.log("[ChatPanel] direct control", _enabled === true);
+  void pushMcpModeToDaemon();
 }
 
 function onCliBridgeEnabledChange(enabled: boolean) {
@@ -2878,10 +3104,47 @@ function openActionModal(opts: OpenActionModalOptions) {
 
 setChatActionModalOpener(openActionModal);
 
-/** 底部 sheet：弹框统一切回输入态（ActionModal 挂在输入区），再按弹框高度矮加高 */
+/**
+ * 底部 sheet：登录 / AI 同意等弹框强制切到「对话态」（消息区可见）。
+ * 弹层挂在面板级 `.chat-panel-action-modals`，不再依赖输入行 v-show。
+ * iPad / Mac 侧栏无互斥切换，仅抬弹层底距到输入框上方。
+ */
 function ensurePhoneComposerForOverlayModal() {
   if (!USE_PHONE_VIEW_TOGGLE.value) return;
-  setPhoneComposerVisible(true);
+  setPhoneComposerVisible(false);
+}
+
+/** 有输入行可见时，弹层贴在输入框上方；纯对话态则贴面板底 */
+const actionModalsBottomPx = ref(12);
+const actionModalsAnchorStyle = computed(() => ({
+  bottom: `${actionModalsBottomPx.value}px`,
+}));
+
+function syncActionModalsAnchorBottom() {
+  try {
+    const inputVisible =
+      !USE_PHONE_VIEW_TOGGLE.value || phoneComposerVisible.value;
+    if (!inputVisible) {
+      actionModalsBottomPx.value = 12;
+      return;
+    }
+    // 只贴 composer 上沿一点间距，不要按整行（含 picker/safe-area）抬太高
+    const panel = document.querySelector(".chat-panel") as HTMLElement | null;
+    const stack = document.querySelector(
+      ".chat-panel .composer-stack",
+    ) as HTMLElement | null;
+    if (!panel || !stack) {
+      actionModalsBottomPx.value = IS_IPAD_SIDE.value ? 100 : 12;
+      return;
+    }
+    const gapPx = 10;
+    const bottom = Math.ceil(
+      panel.getBoundingClientRect().bottom - stack.getBoundingClientRect().top + gapPx,
+    );
+    actionModalsBottomPx.value = Math.max(12, bottom);
+  } catch {
+    actionModalsBottomPx.value = IS_IPAD_SIDE.value ? 100 : 12;
+  }
 }
 
 /** 关掉 ActionModal 后强制收回 sheet（不依赖 coverBoost 标志是否已被其它 sync 打乱） */
@@ -2914,30 +3177,36 @@ function forcePhoneSheetRestoreAfterActionModal() {
   });
 }
 
+function boostPhoneSheetForActionStyleModal(isOpen: () => boolean) {
+  ensurePhoneComposerForOverlayModal();
+  void nextTick(() => {
+    if (!isOpen()) return;
+    syncActionModalsAnchorBottom();
+    if (!IS_IPHONE_SHEET.value) return;
+    if (!phoneOverlayCoverBoost) {
+      phoneSheetHeightBeforeCoverBoostPx = measurePhoneCompactSheetHeightPx();
+    }
+    phoneOverlayBoostFromActionModal.value = true;
+    syncPhoneSheetHeight();
+    void nextTick(() => {
+      if (!isOpen()) return;
+      syncActionModalsAnchorBottom();
+      syncPhoneSheetHeight();
+    });
+  });
+}
+
 watch(showActionModal, (open) => {
   if (!open) {
     actionModalClickHandler.value = null;
     actionModalInviteCode.value = '';
     actionModalInviteLabel.value = '';
-    forcePhoneSheetRestoreAfterActionModal();
+    if (!showSafariAiConsentDialog.value) {
+      forcePhoneSheetRestoreAfterActionModal();
+    }
     return;
   }
-  ensurePhoneComposerForOverlayModal();
-  if (IS_IPHONE_SHEET.value) {
-    // 先等切回输入态布局，再记 before + 按弹框高度加高，避免记成对话半屏高
-    void nextTick(() => {
-      if (!showActionModal.value) return;
-      if (!phoneOverlayCoverBoost) {
-        phoneSheetHeightBeforeCoverBoostPx = measurePhoneCompactSheetHeightPx();
-      }
-      phoneOverlayBoostFromActionModal.value = true;
-      syncPhoneSheetHeight();
-      void nextTick(() => {
-        if (!showActionModal.value) return;
-        syncPhoneSheetHeight();
-      });
-    });
-  }
+  boostPhoneSheetForActionStyleModal(() => showActionModal.value);
 });
 
 function onPhoneChatStopClick() {
@@ -6816,7 +7085,53 @@ type PendingCreateExtensionSend = {
 };
 const pendingCreateExtensionSend = ref<PendingCreateExtensionSend | null>(null);
 
-/** iPhone sheet：大弹框（创建扩展 / Provider）打开时加高；ActionModal 走矮加高 */
+/** Safari：首次发消息前 AI 数据同意；取消后下次发送再弹 */
+const showSafariAiConsentDialog = ref(false);
+type PendingSafariAiConsentSend = {
+  userText: string;
+  opts?: Send2Options;
+};
+const pendingSafariAiConsentSend = ref<PendingSafariAiConsentSend | null>(null);
+
+function dismissSafariAiConsentDialog() {
+  // 先失焦，避免 X 关掉后面板点穿到输入框导致 sheet 加高不回收、光标闪烁
+  blurPhoneComposerInput();
+  phoneOverlayBoostFromActionModal.value = false;
+  showSafariAiConsentDialog.value = false;
+  if (!showActionModal.value) {
+    forcePhoneSheetRestoreAfterActionModal();
+  }
+}
+
+async function onSafariAiConsentAgree() {
+  await setSafariAiDataConsent(true);
+  const pending = pendingSafariAiConsentSend.value;
+  pendingSafariAiConsentSend.value = null;
+  dismissSafariAiConsentDialog();
+  if (!pending) return;
+  await send2(pending.userText, pending.opts);
+}
+
+function onSafariAiConsentCancel() {
+  pendingSafariAiConsentSend.value = null;
+  dismissSafariAiConsentDialog();
+}
+
+/** Safari AI 同意（iPhone sheet + iPad/Mac 侧栏）：对话态 / 抬到输入框上；Dom 失焦 */
+watch(showSafariAiConsentDialog, (open) => {
+  if (!open) return;
+  ensurePhoneComposerForOverlayModal();
+  boostPhoneSheetForActionStyleModal(() => showSafariAiConsentDialog.value);
+  blurPhoneComposerDomOnly();
+  void nextTick(() => {
+    if (!showSafariAiConsentDialog.value) return;
+    ensurePhoneComposerForOverlayModal();
+    syncActionModalsAnchorBottom();
+    blurPhoneComposerDomOnly();
+  });
+});
+
+/** iPhone sheet：大弹框（创建扩展 / Provider）打开时加高；ActionModal / AI 同意走矮加高 */
 watch(
   [showCreateExtensionDescDialog, showProviderSetup],
   ([a, b]) => {
@@ -7469,6 +7784,19 @@ async function send2(userText?: string | Event, opts?: Send2Options) {
   const rawText =
     typeof userText === "string" ? userText : dockComposer.buildMessageText();
   if (!rawText) return;
+
+  // Safari App Store 5.1.2：第三方 AI 前须显式同意；取消则下次发送再弹
+  if (IS_SAFARI_EXT) {
+    const consented = await hasSafariAiDataConsent();
+    if (!consented) {
+      pendingSafariAiConsentSend.value = { userText: rawText, opts };
+      showSafariAiConsentDialog.value = true;
+      logIdleDiag("panel", "send2 paused (safari AI consent)", {
+        elapsedMs: Date.now() - sendDiagT0,
+      });
+      return;
+    }
+  }
 
   const activeConvId = opts?.conversationId ?? conversationId.value;
   const isHandoffText = /<doma\s*\/?>/i.test(rawText) || hasInteractionBlockDomaTag(rawText);
@@ -8201,6 +8529,22 @@ defineExpose({
   border-radius: 10px;
   overflow: hidden;
   isolation: isolate;
+}
+
+/* 登录 / AI 同意：面板级；bottom 由 actionModalsAnchorStyle 动态抬到输入框上方（iPad 侧栏必需） */
+.chat-panel-action-modals {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 300;
+  pointer-events: none;
+  /* bottom 内联：对话态 ~12px；侧栏/有输入行时 = 输入行高度 + 间距 */
+
+  :deep(.action-modal) {
+    pointer-events: auto;
+    /* 底边相对本容器，容器已抬到输入框上沿 */
+    bottom: 0;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

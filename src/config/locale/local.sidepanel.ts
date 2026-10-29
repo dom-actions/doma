@@ -169,6 +169,10 @@ export default {
         bridgeToggle: "Enable MCP bridge",
         bridgeToggleHint:
           "When on, DomA’s side panel listens for desktop agents on the local bridge (side panel must stay open). Off by default.",
+        directToggle: "Direct control (Cursor / Claude brain)",
+        directToggleHint:
+          "When on, MCP exposes DomA browser tools and browser_start_direct_session (status bubble only — no DomA model). Turn off to keep the classic start/send/poll flow. Reload DomA MCP in your agent after switching.",
+        directSessionStatus: "Running: {task}",
         bridgeOn: "Bridge connected",
         bridgeOff: "Bridge offline (enable toggle, keep side panel open, wait for daemon)",
         bridgeDisabled: "Bridge listening is off",
@@ -250,6 +254,14 @@ export default {
         usePopupLabel: "Show a popup",
         usePopupHint: "Checked: open a popup UI. Unchecked: run when the toolbar icon is clicked (no popup).",
         confirm: "Continue",
+        cancel: "Cancel",
+      },
+      safariAiConsent: {
+        title: "AI data sharing",
+        body:
+          "Your current conversation and the page’s accessibility information will be sent to a third-party AI model to perform webpage automation.\n\nThis information is used only for automation you request. Our service does not retain it as stored records or misuse it.",
+        privacyLink: "Privacy Policy",
+        agree: "Agree",
         cancel: "Cancel",
       },
       extensionCard: {
@@ -644,6 +656,10 @@ export default {
         bridgeToggle: "启用 MCP 桥接",
         bridgeToggleHint:
           "开启后，侧栏会监听本机桥以接收桌面 Agent（需保持侧栏打开）。默认关闭。",
+        directToggle: "直控模式（Cursor / Claude 大脑）",
+        directToggleHint:
+          "开启后，MCP 暴露 DomA 浏览器工具与 browser_start_direct_session（侧栏仅状态气泡，不跑 DomA 模型）。关闭则仍为 start/send/poll 雇工模式。切换后请在桌面 Agent 里刷新 DomA MCP。",
+        directSessionStatus: "正在执行：{task}",
         bridgeOn: "桥已连接",
         bridgeOff: "桥未连接（请开启开关、保持侧栏打开、等待 daemon）",
         bridgeDisabled: "桥接监听未开启",
@@ -726,6 +742,14 @@ export default {
         usePopupLabel: "需要弹出 popup",
         usePopupHint: "勾选：点击图标打开弹窗再操作。不勾选：点击工具栏图标直接执行（无弹窗）。",
         confirm: "确定",
+        cancel: "取消",
+      },
+      safariAiConsent: {
+        title: "AI 数据使用同意",
+        body:
+          "当前对话内容以及网页的无障碍信息将被提交给第三方 AI 模型，用于完成网页自动化操作。\n\n这些信息仅用于你发起的自动化任务；我们的服务不会将其作为存档保存，也不会滥用。",
+        privacyLink: "隐私政策",
+        agree: "同意",
         cancel: "取消",
       },
       extensionCard: {
