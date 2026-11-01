@@ -1358,6 +1358,23 @@ export interface ChatMessageToolCall{
   id: string;
   name: string;
   state: 'visible' | 'gone' | 'doing';
+  /** Execution evidence is independent of the optional activity trace. */
+  details?: {
+    status: 'running' | 'completed' | 'error' | 'stopped';
+    startedAt?: number;
+    finishedAt?: number;
+    input?: ToolCallDetailPreview;
+    output?: ToolCallDetailPreview;
+    error?: ToolCallDetailPreview;
+  };
+}
+
+export type ToolCallDetailValue = string | number | boolean | null
+  | ToolCallDetailValue[] | { [key: string]: ToolCallDetailValue };
+
+export interface ToolCallDetailPreview {
+  value: ToolCallDetailValue;
+  truncated?: boolean;
 }
 
 export interface ChatMessageToolBarItem{
