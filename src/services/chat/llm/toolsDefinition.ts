@@ -655,9 +655,9 @@ const CORE_BROWSER_TOOLS: ToolDef[] = [
   {
     name: 'browser_cli_shell',
     description:
-      '在用户本机用 shell 执行一整行命令（类 Cursor 终端）。模型可按经验直接拼命令，不必先探测是否安装；未安装或失败看 stdout/stderr/exitCode。管道、重定向、常见 unix/git/npm 等用本 tool。软件自带且已登记在 CLI 目录的，优先 browser_cli_run。需 CLI Runner 已启动。',
+      '在用户本机用 shell 执行一整行命令（需 CLI Runner）。Windows 使用 cmd.exe，macOS/Linux 使用 bash/sh，按实际 shell 选择语法；PowerShell 或 Bash 专用语法需显式调用对应解释器。失败时读取 shell、stderr 和 exitCode，调整后再执行。软件自带且已登记在 CLI 目录的，优先 browser_cli_run。',
     properties: {
-      command: p('string', '完整 shell 命令行，如 ls -la ~/Documents 或 git status'),
+      command: p('string', '符合本机 shell 语法的完整命令行，如 git status'),
       timeoutSec: p('integer', '超时秒数，默认 120，最大 300'),
     },
     required: ['command'],
