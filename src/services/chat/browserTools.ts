@@ -2822,6 +2822,14 @@ async function browser_call_tab(args: Record<string, unknown>): Promise<unknown>
     instrPreview: instruction.slice(0, 80),
   });
 
+  // The source executor can live in a different panel from the destination.
+  // Stop it before delivering the continuation only to the target panel.
+  if (!isSafariBuild()) {
+    await sendToSidePanel(
+      { operate: "chat/abortForHandover", conversationId: sourceConversationId },
+      { expectResponse: false },
+    );
+  }
   // Safari：投递到目标 tab 的 panelShell（call_tab 已 active 该 tab；payload 给业务）
   void sendToSidePanel(
     {

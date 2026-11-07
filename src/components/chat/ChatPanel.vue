@@ -3488,14 +3488,39 @@ function formatConversationCallChainLines(chain: ConversationCallChainLink[]): s
     .join("\n");
 }
 
-async function runTabHandoverIfNeeded(tab: {
+type TabHandover = {
   sourceTabId: number;
   id: number;
   url: string;
   via?: string;
   /** SW/工具侧显式要求续跑（Safari 新面板看不到 opener loading） */
   resume?: boolean;
-}): Promise<void> {
+};
+
+const pendingTabHandovers = new Map<number, Promise<void>>();
+
+async function runTabHandoverIfNeeded(tab: TabHandover): Promise<void> {
+  if (!Number.isInteger(tab.sourceTabId) || tab.sourceTabId <= 0
+      || !Number.isInteger(tab.id) || tab.id <= 0 || tab.id === tab.sourceTabId) return;
+  try {
+    const protocol = new URL(tab.url).protocol;
+    // Workspace, options, and other internal pages are viewers, not task children.
+    if (protocol !== "http:" && protocol !== "https:") return;
+  } catch {
+    return;
+  }
+  const pending = pendingTabHandovers.get(tab.id);
+  if (pending) return pending;
+  const handover = applyTabHandover(tab);
+  pendingTabHandovers.set(tab.id, handover);
+  try {
+    await handover;
+  } finally {
+    pendingTabHandovers.delete(tab.id);
+  }
+}
+
+async function applyTabHandover(tab: TabHandover): Promise<void> {
   // Safari 新 tab 侧栏常在 delayed loadBoundConversation 之前就收到 handover；
   // 内存 map 仍空，必须先从 storage.local 灌 Context，否则 get*ByTabId 静默 miss。
   try {
@@ -3524,26 +3549,19 @@ async function runTabHandoverIfNeeded(tab: {
     return;
   }
 
+  if (openerConversation.mode === "single" && await getConversationIdByTabId(tab.id)) return;
+
   const openerIsLoading = isConversationLoading(openerConversationId);
+  // Only the live executor may inherit a task. Panels in other windows receive
+  // the same browser event and can contain the same persisted history.
+  const safariShellResume = IS_SAFARI_EXT && tab.via === "runtime-message" && tab.resume === true;
+  if (!openerIsLoading && !safariShellResume) return;
   // resume：工具 navigate 跨面板；openerIsLoading：同面板 webNavigation / Chrome
   const shouldResume = tab.resume === true || openerIsLoading;
-  if (openerIsLoading) {
-    abortControllersByConversation.get(openerConversationId)?.abort();
-  }
 
   if (openerConversation.mode === "single") {
+    const openerController = abortControllersByConversation.get(openerConversationId);
     const newConversationId = generateConversationId();
-    upsertConversationContext({
-      conversationId: newConversationId,
-      tabId: tab.id,
-      mode: "single",
-      tabInfo: {
-        url: tab.url as string | undefined,
-      },
-      lastUserQuestion: openerConversation.lastUserQuestion,
-      parentConversationId: openerConversationId,
-    });
-
     await chatStorage.migrateConversationMessages(
       openerConversationId,
       newConversationId,
@@ -3560,9 +3578,38 @@ async function runTabHandoverIfNeeded(tab: {
       shouldResume,
     });
 
+    // Persistence can yield long enough for Stop or normal completion. Never
+    // turn that stale navigation event into a fresh model request.
+    if (openerIsLoading && (!isConversationLoading(openerConversationId)
+      || abortControllersByConversation.get(openerConversationId) !== openerController)) {
+      await chatStorage.deleteMessagesByConversation(newConversationId);
+      return;
+    }
+    if (openerIsLoading) {
+      setConversationLoading(openerConversationId, false);
+      openerController?.abort();
+    }
+    upsertConversationContext({
+      conversationId: newConversationId,
+      tabId: tab.id,
+      mode: "single",
+      tabInfo: { url: tab.url },
+      lastUserQuestion: openerConversation.lastUserQuestion,
+      parentConversationId: openerConversationId,
+    });
     refreshConversationContextList();
     conversationId.value = newConversationId;
-    await loadConversation(newConversationId, "tabHandover");
+    // Reserve the existing controller slot so Stop during history loading can
+    // cancel this handover before the new model turn starts.
+    const handoverController = new AbortController();
+    abortControllersByConversation.set(newConversationId, handoverController);
+    try {
+      await loadConversation(newConversationId, "tabHandover");
+    } finally {
+      if (abortControllersByConversation.get(newConversationId) === handoverController) {
+        abortControllersByConversation.delete(newConversationId);
+      }
+    }
     // 面板内存再扫一遍，避免 Calling 残留到子页会话
     clearDoingToolCallsOnMessages([], newConversationId);
     void flushAllMessagePersists();
@@ -3572,7 +3619,7 @@ async function runTabHandoverIfNeeded(tab: {
     const rootLink = callChain[0];
     const parentLink = taskDepth > 0 ? callChain[taskDepth - 1] : undefined;
 
-    if (shouldResume) {
+    if (shouldResume && !handoverController.signal.aborted) {
       send2(`<interactionBlock>
 # 最优先使用以下上下文
 ## 跨标签页协作（来源页 tab ${tab.sourceTabId} → 当前子页）
@@ -3604,7 +3651,7 @@ ${taskDepth > 1 ? `- 注意：当前 depth>1，来源页也是中间层；来源
 - 禁止把 browser_call_tab 当作交接的第一步
 - 禁止因「子页看不到总任务完成标志」就停住不回传——应总结子页操作后交还来源页
 - 禁止跳过直接父页 call_tab 更上层 tab
-</interactionBlock>`);
+</interactionBlock>`, { conversationId: newConversationId, siteUrl: tab.url });
     }
   } else if (openerConversation.mode === "group") {
     upsertConversationContext({
@@ -5696,6 +5743,21 @@ async function dispatchSidePanelRuntimeMessage(message: any): Promise<unknown> {
   const operate = message.operate;
   if (typeof origin !== "string" || typeof operate !== "string") return;
 
+  if (!IS_SAFARI_EXT && origin === "background" && operate === "chat/runCallTab") {
+    if (!Number.isInteger(message.targetTabId) || message.targetTabId <= 0) {
+      return { skipped: true };
+    }
+    // Open uses one panel per window. Only the destination window may resume.
+    const browser = getContext().browser;
+    const [panelWindow, targetTab] = await Promise.all([
+      browser.windows.getCurrent().catch(() => null),
+      browser.tabs.get(message.targetTabId).catch(() => null),
+    ]);
+    if (!panelWindow || !targetTab || panelWindow.id !== targetTab.windowId) {
+      return { skipped: true };
+    }
+  }
+
   if (origin === "content" && operate === "pageSelectResult") {
     await handlePageSelectResultMessage(message);
     return;
@@ -5930,6 +5992,12 @@ function addListener() {
     }
   }
   sidePanelRuntimeOnMessageListener = (message, sender, sendResponse) => {
+    // Only the source executor may acknowledge an abort. Otherwise another
+    // window can ACK before the source has stopped and the target resumes.
+    if (message?.origin === "background" && message?.operate === "chat/abortForHandover"
+      && !abortControllersByConversation.has(message.conversationId)) {
+      return undefined;
+    }
     if (
       message?.origin === "background"
       && (message?.operate === "chat/getTabIdByConversationId"
