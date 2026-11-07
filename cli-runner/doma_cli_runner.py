@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import shlex
 import shutil
@@ -132,6 +133,29 @@ def reveal_in_file_manager(path_str: str) -> dict[str, Any]:
     return {"ok": True, "path": str(target), "action": "reveal"}
 
 
+def _decode_command_output(raw: bytes) -> str:
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+
+    encodings = [locale.getpreferredencoding(False)]
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        code_pages = [kernel32.GetConsoleOutputCP(), kernel32.GetOEMCP(), kernel32.GetACP()]
+        encodings = [f"cp{code_page}" for code_page in code_pages if code_page] + encodings
+    for encoding in dict.fromkeys(encodings):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def exec_path_command(command: str, args_str: str = "") -> dict[str, Any]:
     """Run a PATH-resolved binary with argv (no shell). For catalog CLI run."""
     cmd = (command or "").strip()
@@ -148,7 +172,6 @@ def exec_path_command(command: str, args_str: str = "") -> dict[str, Any]:
         proc = subprocess.run(  # noqa: S603
             [resolved, *extra],
             capture_output=True,
-            text=True,
             timeout=120,
         )
     except subprocess.TimeoutExpired:
@@ -162,8 +185,8 @@ def exec_path_command(command: str, args_str: str = "") -> dict[str, Any]:
         "resolved": resolved,
         "args": args_str or "",
         "exitCode": proc.returncode,
-        "stdout": (proc.stdout or "")[-80_000:],
-        "stderr": (proc.stderr or "")[-40_000:],
+        "stdout": _decode_command_output(proc.stdout or b"")[-80_000:],
+        "stderr": _decode_command_output(proc.stderr or b"")[-40_000:],
     }
 
 
@@ -174,7 +197,9 @@ def run_shell_command(command_line: str, timeout_sec: float = 120) -> dict[str, 
         return {"ok": False, "error": "command_required"}
 
     if sys.platform == "win32":
-        argv = ["cmd.exe", "/c", line]
+        # Popen's argv quoting uses backslash escapes, which cmd.exe does not
+        # understand. Let Python wrap the intact command with COMSPEC instead.
+        argv = line
         shell_name = "cmd"
     else:
         bash = shutil.which("bash")
@@ -188,8 +213,8 @@ def run_shell_command(command_line: str, timeout_sec: float = 120) -> dict[str, 
     try:
         proc = subprocess.run(  # noqa: S603
             argv,
+            shell=sys.platform == "win32",
             capture_output=True,
-            text=True,
             timeout=timeout_sec,
         )
     except subprocess.TimeoutExpired:
@@ -208,8 +233,8 @@ def run_shell_command(command_line: str, timeout_sec: float = 120) -> dict[str, 
         "command": line,
         "shell": shell_name,
         "exitCode": proc.returncode,
-        "stdout": (proc.stdout or "")[-80_000:],
-        "stderr": (proc.stderr or "")[-40_000:],
+        "stdout": _decode_command_output(proc.stdout or b"")[-80_000:],
+        "stderr": _decode_command_output(proc.stderr or b"")[-40_000:],
     }
 
 
@@ -217,7 +242,10 @@ class RunnerHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # keep quiet in foreground; still useful when redirected to LOG_FILE
+        # Windows console selection can block writes before HTTP headers are sent.
+        # Keep foreground quiet; retain request logs when redirected to LOG_FILE.
+        if sys.stderr.isatty():
+            return
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def _send(self, code: int, obj: Any) -> None:
@@ -324,6 +352,29 @@ def _read_pid() -> Optional[int]:
 
 
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        # os.kill(pid, 0) uses TerminateProcess on Windows. Query a handle instead.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # Access denied does not mean exited.
+        try:
+            exit_code = wintypes.DWORD()
+            queried = kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(queried) and exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
