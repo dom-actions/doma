@@ -101,11 +101,22 @@ export class OpenAICompatibleService extends LlmService {
       explicitToolChoice: this.extraBody.tool_choice,
       extraBody: this.extraBody,
     });
+    let useProviderTokenDefault = false;
+    if (['deepseek-flash', 'deepseek-v4-pro'].includes(this.model.toLowerCase())) {
+      try {
+        useProviderTokenDefault = new URL(this.completionsUrl).hostname === 'api.deepseek.com';
+      } catch {
+        // Invalid endpoints keep the existing fallback and fetch error behavior.
+      }
+    }
+    // Official V4 defaults account for thinking effort. The legacy 4096 cap can
+    // exhaust thinking before an answer or tool call. Explicit budgets below
+    // still take precedence. https://api-docs.deepseek.com/api/create-chat-completion/
     const requestBody = {
       model: this.model,
       messages,
       tools,
-      max_tokens: 4096,
+      ...(useProviderTokenDefault ? {} : { max_tokens: 4096 }),
       stream: true,
       ...this.extraBody,
       tool_choice: toolChoice,

@@ -132,7 +132,7 @@ try {
       assert.equal((await bodyFor(empty)).tool_choice, undefined);
     }
   });
-  await check('compatibility leaves budgets, thinking configuration, and protocol history unchanged', async () => {
+  await check('official V4 requests use provider defaults and preserve explicit budgets and protocol history', async () => {
     const originalHistory = structuredClone(history);
     for (const extraBody of [
       {},
@@ -144,11 +144,40 @@ try {
       { max_tokens: 9999, max_completion_tokens: 2048 },
     ] as Record<string, unknown>[]) {
       const body = await bodyFor(compatible('https://api.deepseek.com/v1', 'deepseek-flash', extraBody), true);
-      assert.equal(body.max_tokens, extraBody.max_tokens ?? 4096);
+      assert.equal(body.max_tokens, extraBody.max_tokens);
       assert.equal(body.max_completion_tokens, extraBody.max_completion_tokens);
       assert.equal(body.model, 'deepseek-flash'); assert.equal(body.stream, true);
       assert.deepEqual(body.messages.slice(1), originalHistory);
       assert.deepEqual(history, originalHistory);
+    }
+  });
+  await check('provider token defaults apply to both official V4 models and all supported endpoint forms', async () => {
+    for (const model of ['deepseek-flash', 'deepseek-v4-pro']) {
+      for (const endpoint of ['https://api.deepseek.com', 'https://api.deepseek.com/v1',
+        'https://api.deepseek.com/v1/chat/completions', 'https://API.DEEPSEEK.COM/v1']) {
+        for (const extraBody of [{}, { thinking: { type: 'enabled' } },
+          { thinking: { type: 'disabled' } }, { reasoning_effort: 'max' }]) {
+          const body = await bodyFor(compatible(endpoint, model, extraBody));
+          assert.equal(Object.hasOwn(body, 'max_tokens'), false);
+          assert.equal(Object.hasOwn(body, 'max_completion_tokens'), false);
+          assert.deepEqual(body.tools, tools);
+          for (const [key, value] of Object.entries(extraBody)) assert.deepEqual(body[key], value);
+        }
+      }
+    }
+  });
+  await check('legacy models and other providers retain the 4096 default and explicit overrides', async () => {
+    for (const [endpoint, model] of [
+      ['https://api.deepseek.com/v1', 'deepseek-chat'],
+      ['https://api.deepseek.com/v1', 'deepseek-reasoner'],
+      ['https://api.deepseek.com/v1', 'future-model'],
+      ['https://relay.example.test/v1', 'deepseek-flash'],
+      ['https://api.deepseek.com.evil.test/v1', 'deepseek-v4-pro'],
+      ['https://api.openai.com/v1', 'gpt-4o'],
+    ]) {
+      assert.equal((await bodyFor(compatible(endpoint, model))).max_tokens, 4096);
+      const body = await bodyFor(compatible(endpoint, model, { max_tokens: 1234 }));
+      assert.equal(body.max_tokens, 1234);
     }
   });
   await check('standalone Qwen request still disables thinking and supports a required recovery', async () => {
